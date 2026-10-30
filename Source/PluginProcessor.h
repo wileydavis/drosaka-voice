@@ -3,25 +3,13 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <atomic>
+#include "Bank.h"
 
 //==============================================================================
-// One decoded stem. Immutable after loading, shared between threads by
-// reference count so the audio thread never touches a freed buffer.
-struct Stem : public juce::ReferenceCountedObject
-{
-    using Ptr = juce::ReferenceCountedObjectPtr<Stem>;
-
-    juce::AudioBuffer<float> audio;   // 1 or 2 channels, at the file's own rate
-    double sampleRate = 44100.0;
-    juce::File file;
-    std::vector<float> peaks;         // for drawing the waveform (min/max pairs)
-};
-
-//==============================================================================
-// Milestone 1: sample player.
-//   - holds one stem
-//   - any MIDI note-on plays it from the start (pitch is trigger only)
-//   - plays to the end (one-shot); a new note restarts it with a short crossfade
+// Milestone 2: voice bank.
+//   - a bank of time-aligned stems, all fired together by any MIDI note
+//   - auto-sorted by pitch or formant; one primary in the centre
+//   - Count builds the crowd outward from the primary in pairs, crossfading smoothly
 class DrosakaVoiceProcessor : public juce::AudioProcessor
 {
 public:
@@ -53,49 +41,65 @@ public:
     void setStateInformation (const void*, int) override;
 
     //==========================================================================
-    // Message-thread API used by the editor.
-    bool loadStem (const juce::File& file, juce::String& errorOut);
-    Stem::Ptr getStem() const;
+    // Automatable knobs.
+    juce::AudioProcessorValueTreeState params;
+    static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+
+    //==========================================================================
+    // Message-thread bank API (used by the editor).
     static bool isSupportedAudioFile (const juce::String& path);
+    // Imports files; returns the number added, errors appended to 'errors'.
+    int addStems (const juce::StringArray& paths, juce::StringArray& errors);
+    void removeStem (int stemIndex);
+    void setPrimary (int stemIndex);
+    void setMute (int stemIndex, bool);
+    void setSolo (int stemIndex, bool);
+    void setSortAxis (SortAxis);
 
-    // 0..1 playhead for the UI, or -1 when silent.
+    Bank::Ptr getBank() const;
+    juce::StringArray getMissingPaths() const { const juce::ScopedLock l (pathLock); return missingPaths; }
+
+    // 0..1 playhead of the primary for the UI, or -1 when silent.
     float getPlayheadProportion() const { return playhead.load(); }
+    // Current (smoothed) crowd gain per stem index, for the UI's level bars.
+    float getVoiceLevel (int stemIndex) const
+    {
+        return stemIndex >= 0 && stemIndex < maxVoices ? voiceLevel[stemIndex].load() : 0.0f;
+    }
 
-    // Bumped whenever a new stem is installed, so the editor knows to redraw.
-    std::atomic<int> stemGeneration { 0 };
-
-    // If a saved set points at a file that has moved, keep the path (so saving
-    // doesn't erase it) and let the UI say what's missing.
-    juce::String getMissingPath() const { const juce::ScopedLock l (pathLock); return missingPath; }
+    // Bumped whenever the bank changes, so the editor rebuilds.
+    std::atomic<int> bankGeneration { 0 };
 
 private:
-    struct Voice
+    struct Instance   // one triggered playback of the whole bank
     {
         bool active = false;
-        double pos = 0.0;      // in source samples
-        float gain = 0.0f;
-        float gainTarget = 0.0f;
-        float gainStep = 0.0f;
+        double t = 0.0;          // host samples since trigger
+        float env = 0.0f, envTarget = 0.0f, envStep = 0.0f;
     };
 
-    void startVoice();
-    void renderVoices (juce::AudioBuffer<float>& out, int start, int num, const Stem& stem);
+    Stem::Ptr importStem (const juce::File&, juce::String& error);
+    void swapBank (Bank::Ptr);
+    void startInstance();
+    void renderChunk (juce::AudioBuffer<float>& out, int start, int num, Bank& bank,
+                      const float* g0, const float* g1, const float* p0, const float* p1, int blockLen, int blockOffset);
 
     juce::AudioFormatManager formatManager;
 
-    juce::SpinLock stemLock;   // guards only the pointer swap
-    Stem::Ptr stem;
+    juce::SpinLock bankLock;          // guards only the pointer
+    Bank::Ptr bank;
 
     juce::CriticalSection pathLock;
-    juce::String missingPath;
+    juce::StringArray missingPaths;
 
-    // Two slots: the current voice and one fading out after a retrigger.
-    Voice voices[2];
+    std::atomic<float>* countParam = nullptr;
+
+    Instance instances[2];
     int current = 0;
-
     double hostRate = 44100.0;
     int fadeSamples = 64;
     std::atomic<float> playhead { -1.0f };
+    std::atomic<float> voiceLevel[maxVoices] {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrosakaVoiceProcessor)
 };

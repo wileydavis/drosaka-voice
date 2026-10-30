@@ -3,13 +3,15 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
 
+class VoiceRow;
+
 class DrosakaVoiceEditor : public juce::AudioProcessorEditor,
                            public juce::FileDragAndDropTarget,
                            private juce::Timer
 {
 public:
     explicit DrosakaVoiceEditor (DrosakaVoiceProcessor&);
-    ~DrosakaVoiceEditor() override = default;
+    ~DrosakaVoiceEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -21,14 +23,22 @@ public:
 
 private:
     void timerCallback() override;
-    void load (const juce::File&);
+    void addFiles (const juce::StringArray&);
+    void rebuildRows();
     juce::Rectangle<int> waveArea() const;
 
     DrosakaVoiceProcessor& proc;
-    juce::TextButton loadButton { "Load stem..." };
+
+    juce::TextButton addButton { "Add stems..." };
+    juce::TextButton sortPitch { "Pitch" }, sortFormant { "Formant" };
+    juce::Slider countKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> countAttachment;
+    juce::Viewport listView;
+    juce::Component listContent;
+    std::vector<std::unique_ptr<VoiceRow>> rows;
     std::unique_ptr<juce::FileChooser> chooser;
 
-    Stem::Ptr shownStem;
+    Bank::Ptr shownBank;
     int seenGeneration = -1;
     float lastPlayhead = -1.0f;
     bool dragHover = false;

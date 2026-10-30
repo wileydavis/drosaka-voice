@@ -34,7 +34,8 @@ juce_add_plugin(DrosakaVoice
 
 target_sources(DrosakaVoice PRIVATE
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/Analysis.cpp)
 
 target_compile_definitions(DrosakaVoice PUBLIC
     JUCE_WEB_BROWSER=0
@@ -46,6 +47,7 @@ target_link_libraries(DrosakaVoice
     PRIVATE
         juce::juce_audio_utils
         juce::juce_audio_formats
+        juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -55,9 +57,17 @@ target_link_libraries(DrosakaVoice
 option(DV_BUILD_TESTS "Build offline processor tests" OFF)
 if(DV_BUILD_TESTS)
     juce_add_console_app(DrosakaVoiceTests PRODUCT_NAME "DrosakaVoiceTests")
-    target_sources(DrosakaVoiceTests PRIVATE tests/ProcessorTests.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+    target_sources(DrosakaVoiceTests PRIVATE tests/ProcessorTests.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Analysis.cpp)
     target_compile_definitions(DrosakaVoiceTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     target_link_libraries(DrosakaVoiceTests PRIVATE
-        juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors
+        juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors juce::juce_dsp
+        juce::juce_recommended_config_flags)
+endif()
+if(DV_BUILD_TESTS)
+    juce_add_console_app(DrosakaVoiceSnapshot PRODUCT_NAME "DrosakaVoiceSnapshot")
+    target_sources(DrosakaVoiceSnapshot PRIVATE tests/Snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Analysis.cpp)
+    target_compile_definitions(DrosakaVoiceSnapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(DrosakaVoiceSnapshot PRIVATE
+        juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors juce::juce_dsp
         juce::juce_recommended_config_flags)
 endif()

@@ -19,6 +19,7 @@ Position
 Scans a window along the frequency-sorted array: low = chorus of deep voices, high = chorus of thin voices; sweep mid-phrase to morph the crowd
 Count
 How many voices sound (0 to all), building symmetrically outward from the primary in left/right pairs; sets the window width
+  [decided Oct 30, M2] "Outward" = neighbours in the sorted array, nearest first; at the array's edge the window extends on the side that has voices. Each pair fades in together as the knob turns (continuous, no steps). Overall level is normalised as voices are added (gain ÷ √(sum of squared voice gains)) so loudness stays roughly even. Until Spatial mode exists (M6), each pair pans wider the further it sits from the primary, lower-sorted member to the left (interim "radiate").
 Spatial mode
 How chosen voices arrange in the stereo field: radiate from center, bounce around, others TBD; tempo-synced where motion is involved
 Encode count

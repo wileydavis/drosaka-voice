@@ -25,12 +25,35 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 |---|---|
 | 0 Toolchain | ✅ done — builds on Mac, AU + VST3 load in Live |
 | 1 Sample player | ✅ done — tested in Live (AU + VST3), no issues |
-| 2 Voice bank | not started |
+| 2 Voice bank | Written and passing offline tests. **Awaiting ear test in Live** |
 | 3 Codec, single voice | not started |
 | 4 Encode count | not started |
 | 5 Spread | not started |
 | 6 Spatial modes + tempo sync | not started |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Milestone 2 behaviour (as built)
+
+- **Import:** drop any number of stems anywhere on the window (or **Add stems…**, multi-select). Up to 32 voices. Stereo files are summed to mono
+- **Analysis:** each stem is analysed on import for median pitch and formant centroid, and the bank sorts low → high. **Sort: Pitch / Formant** switches the axis
+- **Primary:** the first stem imported is primary. Click **P** on any row to change it. The waveform shows the primary
+- **Mute / solo:** **M** silences a voice but keeps its place in the crowd. **S** auditions soloed voices regardless of Count. **x** removes a voice
+- **Count** (automatable, 0–100% = 0 to all voices): at its lowest the primary fades in, then pairs join, nearest in the sort first, each pair fading in together. At the edge of the sort the window grows on the side that has voices
+- **Stereo:** each pair pans wider the further it sits from the primary, lower voice to the left. This is a stand-in until the spatial modes in M6
+- **Level:** loudness is normalised as voices join, so the crowd stays roughly as loud as one voice
+- **Smoothing:** every Count, primary, sort and mute change glides (50 ms gain, 100 ms pan). Nothing hard-switches
+- **Sync:** any MIDI note fires the whole bank in sync, one-shot, with the same fades as M1
+- **Saving:** the Live set saves the bank as file paths (embedded audio comes in M7). Milestone 1 sets still open
+
+### Milestone 2 test in Live
+
+1. Drop a full ElevenLabs phrase bank on the device: rows should appear sorted, with plausible pitch values
+2. Count at 0%, play the phrase, sweep Count up while it plays: the crowd should build outward from the primary in pairs, with no steps or clicks
+3. Check the stereo picture: the primary stays dead centre and the outer voices sit widest
+4. Try a different primary and the other sort axis while the phrase plays: everything should glide, not jump
+5. Listen for sync: do the stems stay locked to each other, or do any drift or flam?
+6. Mute and solo a few voices, save the set, reopen it: bank, primary, mute/solo and Count should all come back
+7. Judgement call: does the sort order match what your ear says is low → high?
 
 ### Milestone 1 behaviour (as built)
 
