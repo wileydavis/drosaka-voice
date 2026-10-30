@@ -23,8 +23,8 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 | Milestone | State |
 |---|---|
-| 0 Toolchain | `build.sh` written; verified compiling on Linux (VST3). Needs first run on the Mac |
-| 1 Sample player | Written and passing offline tests. **Awaiting ear test in Live** |
+| 0 Toolchain | ✅ done — builds on Mac, AU + VST3 load in Live |
+| 1 Sample player | ✅ done — tested in Live (AU + VST3), no issues |
 | 2 Voice bank | not started |
 | 3 Codec, single voice | not started |
 | 4 Encode count | not started |
