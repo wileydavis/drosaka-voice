@@ -36,7 +36,8 @@ target_sources(DrosakaVoice PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Analysis.cpp
-    Source/LpcCodec.cpp)
+    Source/LpcCodec.cpp
+    Source/Align.cpp)
 
 target_compile_definitions(DrosakaVoice PUBLIC
     JUCE_WEB_BROWSER=0
@@ -63,7 +64,7 @@ if(DV_BUILD_TESTS)
     function(dv_tool name src)
         juce_add_console_app(${name} PRODUCT_NAME "${name}")
         target_sources(${name} PRIVATE ${src} Source/PluginProcessor.cpp Source/PluginEditor.cpp
-                       Source/Analysis.cpp Source/LpcCodec.cpp)
+                       Source/Analysis.cpp Source/LpcCodec.cpp Source/Align.cpp)
         target_compile_definitions(${name} PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
         target_link_libraries(${name} PRIVATE juce::juce_audio_utils juce::juce_audio_formats
                               juce::juce_audio_processors juce::juce_dsp juce::juce_recommended_config_flags)

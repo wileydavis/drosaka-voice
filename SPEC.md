@@ -11,6 +11,7 @@ The instrument holds a bank of pre-rendered voice stems (e.g. one phrase run thr
 • One stem is selectable as the primary voice; it sits dead center and the crowd builds outward from it
 • On import the plugin analyzes each stem (average pitch and formant centroid) and auto-sorts the bank into a frequency array, low to high; sort axis switchable
 • Presets save the whole bank with audio embedded, so a phrase-bank travels with the Live set
+• [added Oct 30, Wiley] Stem alignment, for overlapping separate takes: on import each stem is auto-aligned to the primary by whole-stem time shift (takes only need to be close; no time-warping). Matching uses the syllable-rhythm envelope, so different voices of the same words align; when confidence is low (e.g. different words) the stem is left in place and flagged. Each row shows its waveform on a shared timeline over a ghost of the primary: drag to nudge (shift = fine), double-click to reset to the auto position, "Align all" re-runs against the current primary. Offsets save with the set.
 Controls
 A small set of knobs, all MIDI-mappable and automatable. All changes to voice count and position crossfade smoothly, never hard-switch.
 Control

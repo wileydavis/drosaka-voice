@@ -60,6 +60,11 @@ public:
     void setSolo (int stemIndex, bool);
     void setSortAxis (SortAxis);
 
+    // Alignment (all message thread).
+    void setOffset (int stemIndex, double seconds);   // manual drag
+    void resetOffset (int stemIndex);                 // back to the auto-aligned position
+    void alignAll();                                  // re-run auto-align against the primary
+
     Bank::Ptr getBank() const;
     juce::StringArray getMissingPaths() const { const juce::ScopedLock l (pathLock); return missingPaths; }
 
@@ -84,8 +89,10 @@ public:
     }
     std::atomic<int> audibleVoices { 0 };
 
-    // Bumped whenever the bank changes, so the editor rebuilds.
+    // Bumped whenever the bank changes. structureGeneration only when rows must be
+    // rebuilt (not for offset drags, which would otherwise kill the drag mid-gesture).
     std::atomic<int> bankGeneration { 0 };
+    std::atomic<int> structureGeneration { 0 };
 
 private:
     static constexpr int chunkSize = 512;   // processing sub-block
@@ -106,7 +113,8 @@ private:
     };
 
     Stem::Ptr importStem (const juce::File&, juce::String& error);
-    void swapBank (Bank::Ptr);
+    void swapBank (Bank::Ptr, bool structural = true);
+    void autoAlign (Bank& b, int stemIndex);
     void startInstance();
     void renderDry (int start, int num, Bank& bank);   // all stems, mono, into dryBuf
 

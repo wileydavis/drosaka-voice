@@ -28,9 +28,20 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 2 Voice bank | ✅ done — tested in Live, works |
 | 3 Codec, single voice | ✅ done — tested in Live, sounds good |
 | 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
-| 5 Spread | not started |
+| 5 Spread | in progress — stem alignment (added) is done and awaiting a test |
 | 6 Spatial modes + tempo sync | not started |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Stem alignment (added to Milestone 5)
+
+- **On import:** each new stem is auto-aligned to the primary by shifting the whole stem. The matching uses the speech rhythm (syllable envelope), so another voice or another take of the same words lines up
+- **Low confidence:** if the match is weak (different words, or a take at a very different pace), the stem stays put and its lane turns amber with "? not auto-aligned - drag"
+- **Lanes:** every row shows its waveform on a shared timeline, over a faint orange ghost of the primary. **Drag** to nudge, **Shift-drag** for fine moves, **double-click** to snap back to the auto position. The lane shows each stem's offset in ms
+- **Align all** re-runs auto-alignment against the current primary. This overwrites manual nudges on stems it can align and leaves flagged stems where you put them
+- **Changing the primary** makes it the new reference but leaves everything where it is. Press Align all to re-align to it
+- **Saving:** offsets save with the set
+
+**Test:** drop in a few takes of the same line, recorded separately with different lead-ins. They should snap into sync, and the ghost syllables should sit under each lane's syllables. Drop in a take of different words: it should be flagged, and you can drag it to taste.
 
 ### Milestone 4 behaviour (as built)
 

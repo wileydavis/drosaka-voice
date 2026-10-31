@@ -5,6 +5,9 @@
 
 class VoiceRow;
 
+// Shared time axis for the alignment lanes (seconds). Frozen while a lane is dragged.
+struct Timeline { double start = 0.0, end = 1.0; bool frozen = false; };
+
 class DrosakaVoiceEditor : public juce::AudioProcessorEditor,
                            public juce::FileDragAndDropTarget,
                            private juce::Timer
@@ -25,11 +28,16 @@ private:
     void timerCallback() override;
     void addFiles (const juce::StringArray&);
     void rebuildRows();
+    void updateTimeline();
     juce::Rectangle<int> waveArea() const;
 
     DrosakaVoiceProcessor& proc;
 
     juce::TextButton addButton { "Add stems..." };
+    juce::TextButton alignButton { "Align all" };
+    Timeline timeline;
+    bool timelineDirty = false;
+    int seenStructure = -1;
     juce::TextButton sortPitch { "Pitch" }, sortFormant { "Formant" };
     juce::Slider countKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> countAttachment;

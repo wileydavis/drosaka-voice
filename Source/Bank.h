@@ -4,6 +4,7 @@
 #include <juce_core/juce_core.h>
 #include <vector>
 #include "Analysis.h"
+#include "Align.h"
 
 constexpr int maxVoices = 32;   // spec designs for up to 20
 
@@ -21,12 +22,21 @@ struct Stem : public juce::ReferenceCountedObject
     juce::File file;
     std::vector<float> peaks;         // min/max pairs for drawing
     StemAnalysis analysis;
+    std::vector<float> alignEnv;      // syllable-rhythm envelope for auto-alignment
 
     float curGain = 0.0f;             // audio thread only
     float curPan = 0.0f;              // audio thread only
 };
 
-struct VoiceFlags { bool mute = false, solo = false; };
+enum class AlignState { reference = 0, autoAligned = 1, unsure = 2, manual = 3 };
+
+struct VoiceFlags
+{
+    bool mute = false, solo = false;
+    double offsetSec = 0.0;       // applied time shift (+ = later)
+    double autoOffsetSec = 0.0;   // what auto-align found (double-click resets to it)
+    AlignState align = AlignState::reference;
+};
 
 //==============================================================================
 // Immutable snapshot of the bank. Any edit builds a new one and swaps it in.

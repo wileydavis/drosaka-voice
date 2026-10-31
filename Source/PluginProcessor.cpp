@@ -125,11 +125,13 @@ Stem::Ptr DrosakaVoiceProcessor::importStem (const juce::File& file, juce::Strin
     }
 
     s->analysis = analyseStem (s->audio.getReadPointer (0), len, s->sampleRate);
+    s->alignEnv = align::envelope (s->audio.getReadPointer (0), len, s->sampleRate);
     return s;
 }
 
-void DrosakaVoiceProcessor::swapBank (Bank::Ptr b)
+void DrosakaVoiceProcessor::swapBank (Bank::Ptr b, bool structural)
 {
+    if (structural) ++structureGeneration;
     Bank::Ptr old;
     {
         const juce::SpinLock::ScopedLockType sl (bankLock);
@@ -165,7 +167,8 @@ int DrosakaVoiceProcessor::addStems (const juce::StringArray& paths, juce::Strin
     }
     if (added > 0)
     {
-        b->resort();
+        b->resort();   // sets a primary if there wasn't one
+        for (int i = b->size() - added; i < b->size(); ++i) autoAlign (*b, i);
         swapBank (b);
         const juce::ScopedLock l (pathLock);
         for (auto& s : b->stems) missingPaths.removeString (s->file.getFullPathName());
@@ -189,7 +192,14 @@ void DrosakaVoiceProcessor::setPrimary (int idx)
 {
     auto b = getBank()->clone();
     if (idx < 0 || idx >= b->size()) return;
+    if (b->primary >= 0 && b->primary != idx)
+    {
+        auto& was = b->flags[(size_t) b->primary];   // old reference keeps its place, as if auto-aligned
+        was.autoOffsetSec = was.offsetSec;
+        was.align = AlignState::autoAligned;
+    }
     b->primary = idx;
+    b->flags[(size_t) idx].align = AlignState::reference;
     b->resort();   // also recomputes the encode order (primary last)
     swapBank (b);
 }
@@ -208,6 +218,51 @@ void DrosakaVoiceProcessor::setSolo (int idx, bool on)
     if (idx < 0 || idx >= b->size()) return;
     b->flags[(size_t) idx].solo = on;
     swapBank (b);
+}
+
+void DrosakaVoiceProcessor::autoAlign (Bank& b, int idx)
+{
+    auto& f = b.flags[(size_t) idx];
+    if (idx == b.primary) { f.align = AlignState::reference; return; }
+    const auto& ref = *b.stems[(size_t) b.primary];
+    const auto res = align::findOffset (ref.alignEnv, b.stems[(size_t) idx]->alignEnv, b.flags[(size_t) b.primary].offsetSec);
+    if (res.confident)
+    {
+        f.offsetSec = f.autoOffsetSec = res.offsetSec;
+        f.align = AlignState::autoAligned;
+    }
+    else
+    {
+        f.align = AlignState::unsure;   // probably different words: leave it where it is for the user
+    }
+}
+
+void DrosakaVoiceProcessor::alignAll()
+{
+    auto b = getBank()->clone();
+    for (int i = 0; i < b->size(); ++i) autoAlign (*b, i);
+    swapBank (b, false);
+}
+
+void DrosakaVoiceProcessor::setOffset (int idx, double sec)
+{
+    auto b = getBank()->clone();
+    if (idx < 0 || idx >= b->size()) return;
+    auto& f = b->flags[(size_t) idx];
+    f.offsetSec = juce::jlimit (-30.0, 30.0, sec);
+    if (idx != b->primary && f.align != AlignState::unsure) f.align = AlignState::manual;
+    swapBank (b, false);
+}
+
+void DrosakaVoiceProcessor::resetOffset (int idx)
+{
+    auto b = getBank()->clone();
+    if (idx < 0 || idx >= b->size()) return;
+    auto& f = b->flags[(size_t) idx];
+    if (idx == b->primary) f.offsetSec = 0.0;
+    else if (f.align == AlignState::unsure) f.offsetSec = b->flags[(size_t) b->primary].offsetSec;
+    else { f.offsetSec = f.autoOffsetSec; f.align = AlignState::autoAligned; }
+    swapBank (b, false);
 }
 
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
@@ -245,7 +300,8 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b)
     for (int s = 0; s < n; ++s)
     {
         const auto& st = *b.stems[(size_t) s];
-        longest = juce::jmax (longest, (st.audio.getNumSamples() - 1) * hostRate / st.sampleRate);
+        longest = juce::jmax (longest, (st.audio.getNumSamples() - 1) * hostRate / st.sampleRate
+                                           + juce::jmax (0.0, b.flags[(size_t) s].offsetSec * hostRate));
     }
 
     for (auto& in : instances)
@@ -261,19 +317,23 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b)
             const double step = st.sampleRate / hostRate;
             const double endFadeLen = fadeSamples * step;
 
+            const double offset = b.flags[(size_t) s].offsetSec * hostRate;   // alignment shift, host samples
             float env = in.env, envStep = in.envStep;
             const float envTarget = in.envTarget;
 
             for (int j = 0; j < num; ++j)
             {
-                const double pos = (in.t + j) * step;
-                const int i0 = (int) pos;
+                const double pos = (in.t + j - offset) * step;
+                const int i0 = (int) std::floor (pos);
                 if (i0 >= len - 1) break;
 
-                const float frac = (float) (pos - i0);
-                const float x = src[i0] + frac * (src[i0 + 1] - src[i0]);
-                const float tail = (float) juce::jmin (1.0, (len - 1 - pos) / endFadeLen);
-                dst[j] += env * tail * x;
+                if (i0 >= 0)
+                {
+                    const float frac = (float) (pos - i0);
+                    const float x = src[i0] + frac * (src[i0 + 1] - src[i0]);
+                    const float edge = (float) juce::jmin (1.0, (len - 1 - pos) / endFadeLen, pos / endFadeLen);
+                    dst[j] += env * juce::jmax (0.0f, edge) * x;
+                }
 
                 if (! juce::exactlyEqual (envStep, 0.0f))
                 {
@@ -410,7 +470,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     juce::ValueTree state ("DrosakaVoice");
-    state.setProperty ("version", 2, nullptr);
+    state.setProperty ("version", 3, nullptr);
     state.appendChild (params.copyState(), nullptr);
 
     auto b = getBank();
@@ -425,6 +485,9 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
         v.setProperty ("path", s.file.getFullPathName(), nullptr);
         v.setProperty ("mute", b->flags[(size_t) i].mute, nullptr);
         v.setProperty ("solo", b->flags[(size_t) i].solo, nullptr);
+        v.setProperty ("offset", b->flags[(size_t) i].offsetSec, nullptr);
+        v.setProperty ("autoOffset", b->flags[(size_t) i].autoOffsetSec, nullptr);
+        v.setProperty ("align", (int) b->flags[(size_t) i].align, nullptr);
         bankTree.appendChild (v, nullptr);
     }
     for (auto& missing : getMissingPaths())   // keep them so saving doesn't lose them
@@ -463,7 +526,13 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             if (s == nullptr) { missing.add (path); continue; }
             if (path == primaryPath) b->primary = (int) b->stems.size();
             b->stems.push_back (s);
-            b->flags.push_back ({ (bool) v.getProperty ("mute", false), (bool) v.getProperty ("solo", false) });
+            VoiceFlags fl;
+            fl.mute = (bool) v.getProperty ("mute", false);
+            fl.solo = (bool) v.getProperty ("solo", false);
+            fl.offsetSec = (double) v.getProperty ("offset", 0.0);
+            fl.autoOffsetSec = (double) v.getProperty ("autoOffset", 0.0);
+            fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
+            b->flags.push_back (fl);
         }
     }
     else if (state.hasProperty ("stemPath"))   // Milestone 1 sets

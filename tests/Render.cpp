@@ -2,6 +2,7 @@
 //   DrosakaVoiceRender <stem.wav> <out-dir>
 // Writes one file per setting plus tour.wav (all of them in order, 0.6 s apart).
 #include "../Source/PluginProcessor.h"
+#include "../Source/Align.h"
 #include <cstdio>
 
 struct Setting { const char* name; bool codec; float bitRate, frameDrop; int lock; };
@@ -58,6 +59,25 @@ int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
     if (argc >= 4 && juce::String (argv[1]) == "--build") return renderBuild (argc, argv);
+    if (argc >= 4 && juce::String (argv[1]) == "--align")
+    {
+        // --align ref.wav other.wav ... : print the offset each would get against ref
+        juce::AudioFormatManager fm; fm.registerBasicFormats();
+        auto env = [&] (const char* path)
+        {
+            std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (juce::File (juce::File::getCurrentWorkingDirectory().getChildFile (path))));
+            juce::AudioBuffer<float> b (1, (int) r->lengthInSamples);
+            r->read (&b, 0, (int) r->lengthInSamples, 0, true, false);
+            return align::envelope (b.getReadPointer (0), b.getNumSamples(), r->sampleRate);
+        };
+        auto ref = env (argv[2]);
+        for (int i = 3; i < argc; ++i)
+        {
+            auto res = align::findOffset (ref, env (argv[i]), 0.0);
+            std::printf ("%-22s offset %+7.1f ms  score %.2f  margin %.2f  %s\n", argv[i], res.offsetSec * 1000, res.score, res.margin, res.confident ? "confident" : "NOT confident");
+        }
+        return 0;
+    }
     if (argc < 3) { std::printf ("usage: DrosakaVoiceRender <stem> <out-dir>  |  --build <out.wav> <primary> <stems...>\n"); return 1; }
     const double rate = 48000.0;
     const juce::File stem (argv[1]), outDir (argv[2]);

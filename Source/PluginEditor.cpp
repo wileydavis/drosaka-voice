@@ -10,6 +10,7 @@ namespace colours
     const juce::Colour level  { 0x55ff5a1f };
     const juce::Colour dim    { 0xff6b6f78 };
     const juce::Colour codec  { 0xff3fc8d0 };   // voices on the codec
+    const juce::Colour warn   { 0xffe8a33d };   // couldn't auto-align
 }
 
 namespace
@@ -31,11 +32,27 @@ namespace
 }
 
 //==============================================================================
-// One stem in the sorted list: level bar, name, analysis, P / M / S / x.
+// One stem in the sorted list:
+//   [level + name] [alignment lane: drag to nudge] [codec order] [pitch formant] [P M S x]
 class VoiceRow : public juce::Component
 {
 public:
-    VoiceRow (DrosakaVoiceProcessor& p, const Bank& b, int stemIdx) : proc (p), idx (stemIdx)
+    struct Cols { juce::Rectangle<int> name, lane, order, info, buttons; };
+
+    static Cols columns (juce::Rectangle<int> r)
+    {
+        Cols c;
+        c.buttons = r.removeFromRight (4 * 26 + 4);
+        c.info = r.removeFromRight (150);
+        c.order = r.removeFromRight (34);
+        c.name = r.removeFromLeft (140);
+        r.removeFromLeft (6);
+        c.lane = r.reduced (0, 3);
+        return c;
+    }
+
+    VoiceRow (DrosakaVoiceProcessor& p, std::function<Bank::Ptr()> bankGetter, Timeline& tl, const Bank& b, int stemIdx)
+        : proc (p), getBank (std::move (bankGetter)), timeline (tl), idx (stemIdx)
     {
         const auto& s = *b.stems[(size_t) idx];
         name = s.file.getFileNameWithoutExtension();
@@ -49,7 +66,7 @@ public:
         muteBtn.setToggleState (b.flags[(size_t) idx].mute, juce::dontSendNotification);
         soloBtn.setToggleState (b.flags[(size_t) idx].solo, juce::dontSendNotification);
 
-        primaryBtn.setTooltip ("Primary voice (centre)");
+        primaryBtn.setTooltip ("Primary voice (centre, alignment reference)");
         muteBtn.setTooltip ("Mute");
         soloBtn.setTooltip ("Solo (auditions regardless of Count)");
         removeBtn.setTooltip ("Remove from bank");
@@ -62,44 +79,127 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (2);
-        removeBtn.setBounds (r.removeFromRight (22)); r.removeFromRight (4);
-        soloBtn.setBounds (r.removeFromRight (22));   r.removeFromRight (2);
-        muteBtn.setBounds (r.removeFromRight (22));   r.removeFromRight (2);
-        primaryBtn.setBounds (r.removeFromRight (22));
+        auto r = columns (getLocalBounds()).buttons.reduced (2);
+        removeBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22)); r.removeFromRight (4);
+        soloBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));   r.removeFromRight (2);
+        muteBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));   r.removeFromRight (2);
+        primaryBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));
     }
 
     void paint (juce::Graphics& g) override
     {
-        auto r = getLocalBounds().reduced (0, 1);
+        auto bank = getBank();
+        if (bank == nullptr || idx >= bank->size()) return;
+        const auto c = columns (getLocalBounds());
         g.setColour (colours::row);
-        g.fillRect (r);
+        g.fillRect (getLocalBounds().reduced (0, 1));
 
-        const float lvl = proc.getVoiceLevel (idx);
-        const float enc = proc.getVoiceEncode (idx);
-        const int textW = r.getWidth() - 4 * 26 - 8;
+        // Level (tinted by codec amount) behind the name.
+        const float lvl = proc.getVoiceLevel (idx), enc = proc.getVoiceEncode (idx);
         g.setColour (colours::level.interpolatedWith (colours::codec.withAlpha (0.45f), enc));
-        g.fillRect (r.withWidth (juce::roundToInt (lvl * (float) textW)));
-
-        // Codec order: which infection step takes this voice; lit once it's on the codec.
-        g.setFont (juce::FontOptions (11.0f));
-        const int encodeRank = proc.getVoiceEncodeRank (idx);
-        g.setColour (enc > 0.5f ? colours::codec : colours::dim.withAlpha (0.6f));
-        g.drawText (encodeRank > 0 ? juce::String (encodeRank) : juce::String ("-"), r.withWidth (textW - 190).withTrimmedLeft (160), juce::Justification::centredRight);
-        if (isPrimary) { g.setColour (colours::accent); g.fillRect (r.withWidth (3)); }
-
+        g.fillRect (c.name.reduced (0, 1).withWidth (juce::roundToInt (lvl * (float) c.name.getWidth())));
+        if (isPrimary) { g.setColour (colours::accent); g.fillRect (c.name.reduced (0, 1).withWidth (3)); }
         g.setFont (juce::FontOptions (13.0f));
         g.setColour (colours::wave);
-        g.drawText (name, r.withWidth (textW).withTrimmedLeft (10), juce::Justification::centredLeft, true);
+        g.drawText (name, c.name.withTrimmedLeft (10), juce::Justification::centredLeft, true);
+
+        paintLane (g, c.lane, *bank);
+
+        const int rank = proc.getVoiceEncodeRank (idx);
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (enc > 0.5f ? colours::codec : colours::dim.withAlpha (0.6f));
+        g.drawText (rank > 0 ? juce::String (rank) : juce::String ("-"), c.order, juce::Justification::centred);
         g.setColour (colours::dim);
-        g.drawText (info, r.withWidth (textW - 8), juce::Justification::centredRight);
+        g.drawText (info, c.info.withTrimmedRight (8), juce::Justification::centredRight);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! columns (getLocalBounds()).lane.contains (e.getPosition())) return;
+        auto bank = getBank();
+        dragging = true;
+        timeline.frozen = true;   // keep the scale still under the mouse
+        dragStartOffset = bank->flags[(size_t) idx].offsetSec;
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! dragging) return;
+        const auto lane = columns (getLocalBounds()).lane;
+        const double secPerPx = (timeline.end - timeline.start) / juce::jmax (1, lane.getWidth());
+        const double fine = e.mods.isShiftDown() ? 0.1 : 1.0;
+        proc.setOffset (idx, dragStartOffset + e.getDistanceFromDragStartX() * secPerPx * fine);
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        dragging = false;
+        timeline.frozen = false;
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (columns (getLocalBounds()).lane.contains (e.getPosition())) proc.resetOffset (idx);
     }
 
 private:
+    void drawPeaks (juce::Graphics& g, juce::Rectangle<int> lane, const Stem& s, double offset)
+    {
+        const double span = timeline.end - timeline.start;
+        const double dur = s.audio.getNumSamples() / s.sampleRate;
+        const int bins = (int) s.peaks.size() / 2;
+        const float mid = (float) lane.getCentreY(), half = (float) lane.getHeight() * 0.48f;
+        for (int x = 0; x < lane.getWidth(); ++x)
+        {
+            const double t = timeline.start + span * x / lane.getWidth() - offset;
+            if (t < 0.0 || t >= dur) continue;
+            const int b = juce::jlimit (0, bins - 1, (int) (t / dur * bins));
+            const float lo = s.peaks[(size_t) b * 2], hi = s.peaks[(size_t) b * 2 + 1];
+            g.drawVerticalLine (lane.getX() + x, mid - hi * half * 1.6f, mid - lo * half * 1.6f + 1.0f);
+        }
+    }
+
+    void paintLane (juce::Graphics& g, juce::Rectangle<int> lane, const Bank& b)
+    {
+        g.setColour (colours::bg);
+        g.fillRect (lane);
+        g.saveState();
+        g.reduceClipRegion (lane);
+
+        const auto& f = b.flags[(size_t) idx];
+        if (! isPrimary && b.primary >= 0)
+        {
+            g.setColour (colours::accent.withAlpha (0.28f));   // ghost of the primary, the reference
+            drawPeaks (g, lane, *b.stems[(size_t) b.primary], b.flags[(size_t) b.primary].offsetSec);
+        }
+        const juce::Colour col = isPrimary ? colours::accent
+                               : f.align == AlignState::unsure ? colours::warn
+                               : colours::wave;
+        g.setColour (col.withAlpha (0.9f));
+        drawPeaks (g, lane, *b.stems[(size_t) idx], f.offsetSec);
+        g.restoreState();
+
+        // Status text.
+        g.setFont (juce::FontOptions (10.0f));
+        juce::String tag;
+        if (isPrimary)                          tag = "reference";
+        else if (f.align == AlignState::unsure) tag = "? not auto-aligned - drag";
+        else if (f.align == AlignState::manual) tag = "manual";
+        else                                    tag = "auto";
+        const juce::String ms = juce::String (juce::roundToInt (f.offsetSec * 1000.0)) + " ms";
+        g.setColour (f.align == AlignState::unsure && ! isPrimary ? colours::warn : colours::dim);
+        g.drawText (tag, lane.reduced (4, 0), juce::Justification::topLeft);
+        g.setColour (colours::dim);
+        g.drawText ((f.offsetSec > 0 ? "+" : "") + ms, lane.reduced (4, 0), juce::Justification::topRight);
+    }
+
     DrosakaVoiceProcessor& proc;
+    std::function<Bank::Ptr()> getBank;
+    Timeline& timeline;
     int idx;
     juce::String name, info;
-    bool isPrimary = false;
+    bool isPrimary = false, dragging = false;
+    double dragStartOffset = 0.0;
     juce::TextButton primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
 };
 
@@ -107,6 +207,10 @@ private:
 DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
+    addAndMakeVisible (alignButton);
+    alignButton.setTooltip ("Auto-align every stem to the primary again (overwrites manual nudges)");
+    alignButton.onClick = [this] { proc.alignAll(); };
+
     addAndMakeVisible (addButton);
     addButton.onClick = [this]
     {
@@ -158,7 +262,7 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (760, 600);
+    setSize (860, 640);
     startTimerHz (30);
 }
 
@@ -196,7 +300,7 @@ void DrosakaVoiceEditor::rebuildRows()
     // Low at the top, high at the bottom, in sorted order.
     for (int s : shownBank->sorted)
     {
-        rows.push_back (std::make_unique<VoiceRow> (proc, *shownBank, s));
+        rows.push_back (std::make_unique<VoiceRow> (proc, [this] { return shownBank; }, timeline, *shownBank, s));
         listContent.addAndMakeVisible (*rows.back());
     }
     sortPitch.setToggleState (shownBank->axis == SortAxis::pitch, juce::dontSendNotification);
@@ -211,9 +315,19 @@ void DrosakaVoiceEditor::timerCallback()
     {
         seenGeneration = gen;
         shownBank = proc.getBank();
-        // Rebuilding destroys the button that triggered this; do it from the timer, never inside onClick.
-        rebuildRows();
+        updateTimeline();
+        const int sgen = proc.structureGeneration.load();
+        if (sgen != seenStructure)
+        {
+            seenStructure = sgen;
+            // Rebuilding destroys the button that triggered this; do it from the timer, never inside onClick.
+            rebuildRows();
+        }
         repaint();
+    }
+    else if (! timeline.frozen && timelineDirty)
+    {
+        updateTimeline();
     }
 
     const float ph = proc.getPlayheadProportion();
@@ -222,6 +336,25 @@ void DrosakaVoiceEditor::timerCallback()
         lastPlayhead = ph;
         repaint (waveArea());
     }
+    for (auto& r : rows) r->repaint();
+}
+
+void DrosakaVoiceEditor::updateTimeline()
+{
+    if (timeline.frozen) { timelineDirty = true; return; }   // a drag is in progress
+    timelineDirty = false;
+    if (shownBank == nullptr || shownBank->size() == 0) { timeline.start = 0.0; timeline.end = 1.0; return; }
+    double a = 1e9, b = -1e9;
+    for (int i = 0; i < shownBank->size(); ++i)
+    {
+        const auto& s = *shownBank->stems[(size_t) i];
+        const double off = shownBank->flags[(size_t) i].offsetSec;
+        a = juce::jmin (a, off);
+        b = juce::jmax (b, off + s.audio.getNumSamples() / s.sampleRate);
+    }
+    const double pad = (b - a) * 0.03;
+    timeline.start = a - pad;
+    timeline.end = b + pad;
     for (auto& r : rows) r->repaint();
 }
 
@@ -240,6 +373,7 @@ void DrosakaVoiceEditor::resized()
     addButton.setBounds (getWidth() - 16 - 120, 14, 120, 26);
     sortFormant.setBounds (addButton.getX() - 12 - 70, 14, 70, 26);
     sortPitch.setBounds (sortFormant.getX() - 70, 14, 70, 26);
+    alignButton.setBounds (sortPitch.getX() - 60 - 90, 14, 90, 26);
 
     auto wa = waveArea();
     countKnob.setBounds (wa.getRight() + 32, wa.getY(), 90, 90);
@@ -251,7 +385,7 @@ void DrosakaVoiceEditor::resized()
     pitchLockBox.setBounds (ca.getX() + 490, ca.getCentreY() - 6, 120, 26);
 
     listView.setBounds (16, ca.getBottom() + 34, getWidth() - 32, getHeight() - ca.getBottom() - 34 - 30);
-    const int rowH = 26;
+    const int rowH = 34;
     listContent.setSize (listView.getMaximumVisibleWidth(), juce::jmax (1, (int) rows.size() * rowH));
     for (size_t i = 0; i < rows.size(); ++i)
         rows[i]->setBounds (0, (int) i * rowH, listContent.getWidth(), rowH);
@@ -353,12 +487,14 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
 
     // List header.
     g.setColour (colours::dim);
-    g.drawText (juce::String (n) + (n == 1 ? " voice" : " voices") + "   low → high by "
-                    + (shownBank != nullptr && shownBank->axis == SortAxis::formant ? "formant" : "pitch"),
-                16, listView.getY() - 22, 400, 18, juce::Justification::centredLeft);
-    const int infoRight = listView.getX() + listView.getMaximumVisibleWidth() - 4 * 26 - 16;   // matches VoiceRow
-    g.drawText ("pitch       formant", infoRight - 200, listView.getY() - 22, 200, 18, juce::Justification::centredRight);
-    g.drawText ("codec order", 16, listView.getY() - 22, listView.getMaximumVisibleWidth() - 4 * 26 - 8 - 190 + 16, 18, juce::Justification::centredRight);
+    g.drawText (juce::String (n) + (n == 1 ? " voice" : " voices") + juce::String (juce::CharPointer_UTF8 ("  low \xe2\x86\x92 high")),
+                16, listView.getY() - 22, 140, 18, juce::Justification::centredLeft);
+    {
+        auto cols = VoiceRow::columns ({ listView.getX(), listView.getY() - 22, listView.getMaximumVisibleWidth(), 18 });
+        g.drawText ("pitch       formant", cols.info.withTrimmedRight (8), juce::Justification::centredRight);
+        g.drawText ("codec", cols.order, juce::Justification::centred);
+        g.drawText ("alignment to primary  (drag, shift = fine, double-click = reset)", cols.lane, juce::Justification::centredLeft);
+    }
 
     // Footer: errors or missing files.
     auto footer = juce::Rectangle<int> (16, getHeight() - 26, getWidth() - 32, 22);

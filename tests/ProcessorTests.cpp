@@ -466,6 +466,83 @@ int main()
         CHECK (std::abs (ratio) < 3.0, "fully encoded crowd within 3 dB of the dry crowd");
     }
 
+
+    std::printf ("alignment\n");
+    {
+        // Syllable patterns: same words = same pattern; different words = different pattern.
+        auto speechish = [&] (float f0, float bright, std::vector<std::pair<float, float>> syllables, double padSec)
+        {
+            const int pad = (int) (padSec * rate), len = pad + (int) (rate * 2.2);
+            auto tone = voiceTone (f0, bright, rate, len);
+            juce::AudioBuffer<float> b (1, len); b.clear();
+            for (auto [start, dur] : syllables)
+                for (int i = 0; i < (int) (dur * rate); ++i)
+                {
+                    const int at = pad + (int) (start * rate) + i;
+                    if (at < len) b.setSample (0, at, tone.getSample (0, at) * std::sin (juce::MathConstants<float>::pi * (float) i / (dur * (float) rate)));
+                }
+            return b;
+        };
+        const std::vector<std::pair<float, float>> wordsA { { 0.10f, 0.14f }, { 0.30f, 0.22f }, { 0.58f, 0.09f }, { 0.72f, 0.18f }, { 1.05f, 0.25f }, { 1.40f, 0.11f }, { 1.58f, 0.30f } };
+        const std::vector<std::pair<float, float>> wordsB { { 0.05f, 0.25f }, { 0.40f, 0.10f }, { 0.55f, 0.30f }, { 0.95f, 0.12f }, { 1.15f, 0.12f }, { 1.35f, 0.35f } };
+
+        auto fRef  = writeWav ("al_ref.wav",  speechish (120.0f, 0.3f, wordsA, 0.0), rate);
+        auto fTake = writeWav ("al_take.wav", speechish (210.0f, 1.0f, wordsA, 0.317), rate);   // other voice, 317 ms late
+        auto fLead = writeWav ("al_lead.wav", speechish (160.0f, 0.6f, wordsA, 0.0), rate);
+        auto fDiff = writeWav ("al_diff.wav", speechish (150.0f, 0.5f, wordsB, 0.2), rate);     // different words
+
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs;
+        p.addStems ({ fRef.getFullPathName(), fTake.getFullPathName(), fLead.getFullPathName(), fDiff.getFullPathName() }, errs);
+        auto b = p.getBank();
+        const auto& f = b->flags;
+        std::printf ("       take offset %.1f ms (%d), lead %.1f ms (%d), different words %.1f ms (%d)\n",
+                     f[1].offsetSec * 1000, (int) f[1].align, f[2].offsetSec * 1000, (int) f[2].align, f[3].offsetSec * 1000, (int) f[3].align);
+        CHECK (f[0].align == AlignState::reference, "primary is the alignment reference");
+        CHECK (f[1].align == AlignState::autoAligned && std::abs (f[1].offsetSec + 0.317) < 0.004, "a late take in another voice is pulled back 317 ms (within 4 ms)");
+        CHECK (f[2].align == AlignState::autoAligned && std::abs (f[2].offsetSec) < 0.004, "an already-aligned voice stays put");
+        CHECK (f[3].align == AlignState::unsure && f[3].offsetSec == 0.0, "different words: flagged, not moved");
+
+        // Playback honours offsets: the take's first syllable now lands with the primary's.
+        auto onsetOf = [&] (int voice)
+        {
+            p.setSolo (voice, true);
+            run (p, 256, 700, {});   // let any previous phrase (2.5 s) finish
+            auto out = run (p, 256, 120, { 0 });
+            p.setSolo (voice, false);
+            // Both channels: the crowd is panned, so a voice may sit hard left or right.
+            for (int i = 0; i < out.getNumSamples(); ++i)
+                if (std::abs (out.getSample (0, i)) + std::abs (out.getSample (1, i)) > 0.01f) return i;
+            return -1;
+        };
+        const int o0 = onsetOf (0), o1 = onsetOf (1);
+        std::printf ("       onsets: primary %d, aligned take %d (samples)\n", o0, o1);
+        CHECK (o0 > 0 && std::abs (o0 - o1) < (int) (0.006 * rate), "aligned take plays in sync with the primary");
+
+        // Manual nudge, reset, and negative offsets that start mid-file.
+        p.setOffset (3, -0.2);
+        CHECK (p.getBank()->flags[3].offsetSec == -0.2, "manual drag sets the offset");
+        p.setOffset (1, 0.05);
+        CHECK (p.getBank()->flags[1].align == AlignState::manual, "dragging an auto-aligned voice marks it manual");
+        p.resetOffset (1);
+        CHECK (std::abs (p.getBank()->flags[1].offsetSec + 0.317) < 0.004 && p.getBank()->flags[1].align == AlignState::autoAligned,
+               "double-click reset returns to the auto position");
+        const int o3 = onsetOf (3);
+        CHECK (o3 >= 0, "negative offset (starts mid-file) plays without trouble");
+
+        // Saved with the set.
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (std::abs (q.getBank()->flags[1].offsetSec + 0.317) < 0.004 && q.getBank()->flags[3].offsetSec == -0.2
+               && q.getBank()->flags[3].align == AlignState::unsure, "offsets and alignment state reopen with the set");
+
+        // Align all after moving things around.
+        p.setOffset (1, 1.0);
+        p.alignAll();
+        CHECK (std::abs (p.getBank()->flags[1].offsetSec + 0.317) < 0.004 && p.getBank()->flags[3].offsetSec == -0.2,
+               "Align all re-aligns what it can and leaves flagged voices where you put them");
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");
