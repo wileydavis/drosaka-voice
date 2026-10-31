@@ -2,6 +2,7 @@
 #include "../Source/PluginEditor.h"
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
@@ -21,6 +22,15 @@ int main (int argc, char** argv)
     p.params.getParameter ("spatialMode")->setValueNotifyingHost (p.params.getParameter ("spatialMode")->convertTo0to1 (1.0f));
     juce::AudioBuffer<float> b (2, 256); juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
     for (int i = 0; i < 60; ++i) { p.processBlock (b, m); m.clear(); }
+    // A few MIDI-learned knobs, and one armed.
+    for (auto [id, cc] : std::vector<std::pair<const char*, int>> { { "count", 1 }, { "spread", 2 }, { "encodeCount", 5 }, { "gate", 13 } })
+    {
+        p.armMidiLearn (id);
+        juce::AudioBuffer<float> blk (2, 256); juce::MidiBuffer mm; mm.addEvent (juce::MidiMessage::controllerEvent (1, cc, 64), 0);
+        p.processBlock (blk, mm);
+    }
+    p.applyPendingMidi();
+    p.armMidiLearn ("bitRate");
     std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
     for (int i = 0; i < 5; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
     auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

@@ -1181,6 +1181,54 @@ int main()
         set ("depth", 0.0f);
     }
 
+
+    std::printf ("MIDI mapping\n");
+    {
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        auto& ps = p.getParameters();
+        bool allAuto = true; juce::StringArray ids;
+        for (auto* prm : ps)
+        {
+            allAuto &= prm->isAutomatable();
+            if (auto* w = dynamic_cast<juce::AudioProcessorParameterWithID*> (prm)) ids.add (w->paramID);
+        }
+        std::printf ("       %d parameters: %s\n", ps.size(), ids.joinIntoString (" ").toRawUTF8());
+        CHECK (allAuto && ps.size() <= 64, "every control is an automatable host parameter (and few enough for Live to list them)");
+
+        auto cc = [&] (int number, int value)
+        {
+            juce::AudioBuffer<float> blk (2, 256); juce::MidiBuffer m;
+            m.addEvent (juce::MidiMessage::controllerEvent (3, number, value), 10);
+            p.processBlock (blk, m);
+            p.applyPendingMidi();   // the message-thread step (a 60 Hz timer in the plugin)
+        };
+        p.armMidiLearn ("spread");
+        CHECK (p.getLearningParam() == "spread", "arming learn on a knob");
+        cc (21, 64);
+        CHECK (p.getCcFor ("spread") == 21 && p.getLearningParam().isEmpty(), "the next CC (any channel) is bound to it");
+        cc (21, 127);
+        CHECK (std::abs (p.params.getParameter ("spread")->getValue() - 1.0f) < 1e-6f, "the CC drives the knob, through the host");
+        cc (21, 0);
+        CHECK (p.params.getParameter ("spread")->getValue() < 1e-6f, "both ways");
+
+        p.armMidiLearn ("patternType");   // a stepped knob
+        cc (22, 0);
+        cc (22, 127);
+        CHECK ((int) p.params.getRawParameterValue ("patternType")->load() == 6, "stepped knobs step through their choices");
+
+        p.armMidiLearn ("spread");
+        cc (30, 10);
+        CHECK (p.getCcFor ("spread") == 30, "re-learning moves the knob to the new CC");
+        cc (21, 127);
+        CHECK (p.params.getParameter ("spread")->getValue() < 0.1f, "and the old CC lets go of it");
+
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (q.getCcFor ("spread") == 30 && q.getCcFor ("patternType") == 22, "mappings save with the set");
+        p.forgetCc ("spread");
+        CHECK (p.getCcFor ("spread") == -1, "Forget removes a mapping");
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

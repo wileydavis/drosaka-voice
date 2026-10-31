@@ -31,7 +31,27 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 5 Spread (+ stem alignment) | ✅ done — tested in Live, sounds great |
 | 6 Spatial modes + tempo sync | ✅ done — tested in Live, sounds good |
 | 7 Slicing + presets w/ embedded audio | ✅ done — tested in Live, worked perfectly |
-| 8 Pattern mode + open questions (Drop, Keep primary human, Depth) | Written and passing offline tests. **Awaiting ear test in Live** |
+| 8 Pattern mode + open questions (Drop, Keep primary human, Depth) | ✅ done — tested in Live, sounds good |
+| 9 4x4 control grid + MIDI learn | Written and passing offline tests. **Awaiting a look in Live** |
+
+### Controls: the 4×4 grid and MIDI
+
+All sixteen knobs sit in one 4×4 grid, row by row:
+
+| | | | |
+|---|---|---|---|
+| COUNT | SPREAD | SNAP | CHORD |
+| ENCODE | BIT RATE | FRAME DROP | DEPTH |
+| SPACE | RATE | PATTERN | DIVISION |
+| GATE | DENSITY | REPEATS | SCREW DROP |
+
+- **Colours:** each knob is coloured by its section (crowd, pitch, codec, space, pattern)
+- **Readouts:** each cell shows a live value ("2.5 of 5", "chorus → chord", "1.5 of 3 audible")
+- **Double-click** a knob to reset it
+- **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH) and the stereo-field view sit in the Performance panel beside the grid
+- **MIDI learn:** right-click a knob, choose MIDI learn, then turn a controller. The knob shows its CC in the corner. Any channel works, and one CC drives one knob (re-learning moves it). Right-click and choose Forget to remove it. Mappings save with the Live set and presets
+- **Host parameters:** every control (22 in all) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
+- **Controller layout:** the grid is laid out to match a 16-encoder controller like the MIDI Fighter Twister one-to-one: learn each knob to the encoder in the same position
 
 ### Milestone 8 behaviour (as built)
 

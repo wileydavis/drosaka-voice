@@ -18,7 +18,8 @@
 //   - every voice runs through its own LPC codec; dry voices are delayed to match the
 //     codec's latency (reported to the host). Encode count moves the audible voices onto
 //     the codec one at a time in a fixed scatter order, primary last.
-class DrosakaVoiceProcessor : public juce::AudioProcessor
+class DrosakaVoiceProcessor : public juce::AudioProcessor,
+                              private juce::Timer
 {
 public:
     DrosakaVoiceProcessor();
@@ -73,6 +74,16 @@ public:
     void addSlice (double seconds);
     void moveSlice (int index, double seconds);       // clamped between its neighbours
     void removeSlice (int index);
+
+    // MIDI learn: any parameter can be driven by a MIDI CC (any channel). The editor
+    // arms a parameter; the next CC that arrives is bound to it. Mappings save with the set.
+    void armMidiLearn (const juce::String& paramId);
+    void cancelMidiLearn() { learnParam = -1; }
+    juce::String getLearningParam() const;
+    int getCcFor (const juce::String& paramId) const;      // -1 if none
+    void forgetCc (const juce::String& paramId);
+    void applyPendingMidi();                                // message thread: push CC moves to the host
+    std::atomic<int> midiMapGeneration { 0 };
 
     // Presets: the same state the Live set stores (bank with embedded audio, slices, knobs).
     bool savePreset (const juce::File&);
@@ -232,6 +243,14 @@ private:
     std::atomic<float> voiceLevel[maxVoices] {};
     std::atomic<float> voiceEncode[maxVoices] {};
     std::atomic<int> voiceRank[maxVoices] {};
+
+    // MIDI learn state: CC number -> parameter index (into getParameters()).
+    std::atomic<int> ccToParam[128];
+    std::atomic<int> learnParam { -1 };
+    std::atomic<float> pendingCc[128];        // latest value per CC, -1 = nothing new
+    void timerCallback() override { applyPendingMidi(); }
+    void handleCc (const juce::MidiMessage&);
+    int paramIndex (const juce::String& id) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrosakaVoiceProcessor)
 };

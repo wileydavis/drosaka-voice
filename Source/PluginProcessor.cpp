@@ -30,6 +30,9 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
       params (*this, nullptr, "PARAMS", createLayout())
 {
     formatManager.registerBasicFormats();
+    for (auto& c : ccToParam) c = -1;
+    for (auto& c : pendingCc) c = -1.0f;
+    startTimerHz (60);   // applies MIDI-learned CC moves on the message thread
     countParam = params.getRawParameterValue ("count");
     encodeParam = params.getRawParameterValue ("encodeCount");
     spreadParam = params.getRawParameterValue ("spread");
@@ -604,6 +607,10 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 {
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
+
+    // MIDI-learned controls work whether or not a bank is loaded.
+    for (const auto meta : midi)
+        if (meta.getMessage().isController()) handleCc (meta.getMessage());
     const int numSamples = buffer.getNumSamples();
     if (numSamples == 0 || buffer.getNumChannels() < 2) return;
 
@@ -984,6 +991,14 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
     state.appendChild (bankTree, nullptr);
 
+    // MIDI-learned controls, by parameter ID ("cc:id,cc:id").
+    juce::StringArray map;
+    auto& ps = getParameters();
+    for (int cc = 0; cc < 128; ++cc)
+        if (const int pi = ccToParam[cc].load(); pi >= 0 && pi < ps.size())
+            if (auto* p = dynamic_cast<juce::AudioProcessorParameterWithID*> (ps[pi])) map.add (juce::String (cc) + ":" + p->paramID);
+    state.setProperty ("midiMap", map.joinIntoString (","), nullptr);
+
     juce::MemoryOutputStream out (dest, false);
     out.write (stateMagic, 4);
     state.writeToStream (out);
@@ -1000,6 +1015,15 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
 
     auto p = state.getChildWithName (params.state.getType());
     if (p.isValid()) params.replaceState (p);
+
+    for (auto& c : ccToParam) c = -1;
+    for (auto& entry : juce::StringArray::fromTokens (state.getProperty ("midiMap").toString(), ",", ""))
+    {
+        const int cc = entry.upToFirstOccurrenceOf (":", false, false).getIntValue();
+        const int pi = paramIndex (entry.fromFirstOccurrenceOf (":", false, false));
+        if (cc >= 0 && cc < 128 && pi >= 0) ccToParam[cc] = pi;
+    }
+    ++midiMapGeneration;
 
     Bank::Ptr b = new Bank();
     juce::StringArray missing;
@@ -1059,6 +1083,72 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     if (b->primary >= 0 && b->primary < b->size()) b->flags[(size_t) b->primary].align = AlignState::reference;
     { const juce::ScopedLock l (pathLock); missingPaths = missing; }
     swapBank (b);
+}
+
+//==============================================================================
+int DrosakaVoiceProcessor::paramIndex (const juce::String& id) const
+{
+    auto& ps = getParameters();
+    for (int i = 0; i < ps.size(); ++i)
+        if (auto* p = dynamic_cast<juce::AudioProcessorParameterWithID*> (ps[i]); p != nullptr && p->paramID == id) return i;
+    return -1;
+}
+
+void DrosakaVoiceProcessor::armMidiLearn (const juce::String& id) { learnParam = paramIndex (id); ++midiMapGeneration; }
+
+juce::String DrosakaVoiceProcessor::getLearningParam() const
+{
+    const int i = learnParam.load();
+    if (i < 0 || i >= getParameters().size()) return {};
+    if (auto* p = dynamic_cast<juce::AudioProcessorParameterWithID*> (getParameters()[i])) return p->paramID;
+    return {};
+}
+
+int DrosakaVoiceProcessor::getCcFor (const juce::String& id) const
+{
+    const int pi = paramIndex (id);
+    if (pi < 0) return -1;
+    for (int cc = 0; cc < 128; ++cc) if (ccToParam[cc].load() == pi) return cc;
+    return -1;
+}
+
+void DrosakaVoiceProcessor::forgetCc (const juce::String& id)
+{
+    const int pi = paramIndex (id);
+    for (auto& c : ccToParam) if (c.load() == pi) c = -1;
+    ++midiMapGeneration;
+}
+
+// Audio thread: bind or route a CC. The parameter itself is set on the message thread
+// (applyPendingMidi) so the host is notified properly and records automation.
+void DrosakaVoiceProcessor::handleCc (const juce::MidiMessage& m)
+{
+    const int cc = m.getControllerNumber();
+    if (cc < 0 || cc > 127) return;
+    if (const int learn = learnParam.load(); learn >= 0)
+    {
+        for (auto& c : ccToParam) if (c.load() == learn) c = -1;   // one CC per parameter
+        ccToParam[cc] = learn;
+        learnParam = -1;
+        ++midiMapGeneration;
+    }
+    if (ccToParam[cc].load() >= 0) pendingCc[cc] = (float) m.getControllerValue() / 127.0f;
+}
+
+void DrosakaVoiceProcessor::applyPendingMidi()
+{
+    auto& ps = getParameters();
+    for (int cc = 0; cc < 128; ++cc)
+    {
+        const float v = pendingCc[cc].exchange (-1.0f);
+        const int pi = ccToParam[cc].load();
+        if (v < 0.0f || pi < 0 || pi >= ps.size()) continue;
+        auto* p = ps[pi];
+        if (std::abs (p->getValue() - v) < 1e-6f) continue;
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (v);
+        p->endChangeGesture();
+    }
 }
 
 bool DrosakaVoiceProcessor::savePreset (const juce::File& f)
