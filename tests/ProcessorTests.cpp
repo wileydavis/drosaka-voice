@@ -4,6 +4,21 @@
 #include <algorithm>
 
 static int failures = 0;
+
+// A stand-in for Live's transport.
+struct TestPlayHead : juce::AudioPlayHead
+{
+    double ppq = 0.0, bpm = 120.0;
+    bool playing = true;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p;
+        p.setBpm (bpm);
+        p.setPpqPosition (ppq);
+        p.setIsPlaying (playing);
+        return p;
+    }
+};
 #define CHECK(cond, msg) do { if (cond) std::printf ("  ok   %s\n", msg); \
                               else { std::printf ("  FAIL %s\n", msg); ++failures; } } while (0)
 
@@ -670,6 +685,138 @@ int main()
         bool finite = true; for (int i = 0; i < sweep.getNumSamples(); ++i) finite &= std::isfinite (sweep.getSample (0, i));
         CHECK (finite, "output stays finite through the sweep");
         p.setSolo (1, false);
+    }
+
+
+    std::printf ("spatial modes (maths)\n");
+    {
+        auto b = fakeBank ({ 100, 200, 300, 400, 500, 600, 700 }, 3);
+        float g[maxVoices], rad[maxVoices], out[maxVoices], out2[maxVoices];
+        computeCrowd (*b, 7.0f, g, rad);
+        spatial::pans (spatial::radiate, *b, rad, g, 0, 0.0, out);
+        CHECK (std::equal (out, out + 7, rad), "Radiate = the crowd layout");
+
+        spatial::pans (spatial::swap, *b, rad, g, 1, 0.0, out);
+        bool mirrored = true; for (int i = 0; i < 7; ++i) mirrored &= std::abs (out[i] + rad[i]) < 1e-6f;
+        CHECK (mirrored && out[3] == 0.0f, "Swap mirrors the field on odd divisions, primary stays centred");
+
+        spatial::pans (spatial::bounce, *b, rad, g, 10, 0.0, out);
+        spatial::pans (spatial::bounce, *b, rad, g, 11, 0.0, out2);
+        int moved = 0; float lo = 1, hi = -1;
+        for (int i = 0; i < 7; ++i) { if (i != 3 && std::abs (out[i] - out2[i]) > 0.01f) ++moved; lo = juce::jmin (lo, out[i]); hi = juce::jmax (hi, out[i]); }
+        CHECK (moved >= 4 && out[3] == 0.0f && out2[3] == 0.0f, "Bounce: voices hop each division, primary stays centred");
+        CHECK (lo <= -0.99f && hi >= 0.99f, "Bounce keeps the crowd spread edge to edge");
+        float again[maxVoices]; spatial::pans (spatial::bounce, *b, rad, g, 10, 0.0, again);
+        CHECK (std::equal (out, out + 7, again), "Bounce is repeatable: same bar, same positions (fixed seed)");
+
+        spatial::pans (spatial::orbit, *b, rad, g, 0, 0.25, out);
+        spatial::pans (spatial::orbit, *b, rad, g, 0, 0.25 + 1.0, out2);
+        bool periodic = true; for (int i = 0; i < 7; ++i) periodic &= std::abs (out[i] - out2[i]) < 1e-4f;
+        CHECK (periodic && out[3] == 0.0f, "Orbit: one revolution per division, primary centred");
+
+        float half[maxVoices]; computeCrowd (*b, 3.0f, half, rad);
+        spatial::pans (spatial::bounce, *b, rad, half, 5, 0.0, out);
+        CHECK (out[2] != rad[2] || out[4] != rad[4], "Bounce moves only the audible voices around");
+    }
+
+    std::printf ("tempo sync\n");
+    {
+        juce::StringArray paths;
+        const float f0s[] = { 120, 140, 160, 180, 200 };
+        for (int i = 0; i < 5; ++i)
+            paths.add (writeWav ("ts" + juce::String (i) + ".wav", voiceTone (f0s[i], 0.3f, rate, (int) rate * 6), rate).getFullPathName());
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        TestPlayHead ph; p.setPlayHead (&ph);
+        juce::StringArray errs; p.addStems (paths, errs);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        set ("count", 1.0f);
+        const double spb = rate * 60.0 / ph.bpm;            // 24000 samples per beat at 120
+        const double latBeats = p.getLatencySamples() / spb;
+
+        // Drive the transport block by block.
+        auto block = [&] (int nBlocks, std::function<void (int)> each = {})
+        {
+            juce::AudioBuffer<float> buf (2, 256);
+            for (int k = 0; k < nBlocks; ++k)
+            {
+                if (each) each (k);
+                juce::MidiBuffer m;
+                p.processBlock (buf, m);
+                if (ph.playing) ph.ppq += 256.0 / spb;
+            }
+        };
+        auto encodedCount = [&] { int c = 0; for (int s = 0; s < 5; ++s) c += p.getVoiceEncode (s) > 0.5f ? 1 : 0; return c; };
+
+        // Encode quantised to 1/4: turn the knob to 60% (3 of 5 voices) mid-beat;
+        // nothing flips until the next beat line, as heard (i.e. latency-compensated).
+        set ("encodeQuant", 3.0f);   // 1/4
+        set ("encodeCount", 0.0f);
+        ph.ppq = 10.25 + latBeats;   // the output sample is at beat 10.25
+        block (20);
+        set ("encodeCount", 0.6f);
+        const double toNextBeat = 11.0 - (ph.ppq - latBeats);   // beats until the line, as heard
+        const int blocksBefore = (int) (toNextBeat * spb / 256.0) - 2;
+        block (blocksBefore);
+        const int before = encodedCount();
+        block (14);   // past the line + the 30 ms crossfade
+        const int after = encodedCount();
+        std::printf ("       encoded voices: %d just before the beat, %d after it\n", before, after);
+        CHECK (before == 0 && after == 3, "quantised Encode waits for the beat, then flips the whole step");
+
+        set ("encodeQuant", 0.0f);   // Free
+        set ("encodeCount", 0.2f);
+        block (12);
+        CHECK (encodedCount() == 1, "Free Encode follows the knob immediately");
+
+        // Bounce on 1/8: pans change only on the grid lines, and land on them.
+        set ("encodeCount", 0.0f);
+        set ("spatialMode", 1.0f); set ("motionDiv", 5.0f);   // Bounce, 1/8
+        ph.ppq = 20.0 + latBeats + 0.01;
+        block (8);
+        std::vector<float> trace;
+        block (400, [&] (int) { trace.push_back (p.getVoicePan (4)); });   // ~4.3 beats, 256-sample resolution
+        int changes = 0;
+        for (size_t i = 1; i < trace.size(); ++i) if (std::abs (trace[i] - trace[i - 1]) > 0.05f && (i < 2 || std::abs (trace[i - 1] - trace[i - 2]) < 0.05f)) ++changes;
+        std::printf ("       Bounce at 1/8 over ~4.3 beats: %d hops\n", changes);
+        CHECK (changes >= 7 && changes <= 9, "Bounce hops once per 1/8 note");
+
+        // Stopped transport: an internal clock keeps motion going at the last tempo.
+        ph.playing = false;
+        trace.clear();
+        block (400, [&] (int) { trace.push_back (p.getVoicePan (4)); });
+        changes = 0;
+        for (size_t i = 1; i < trace.size(); ++i) if (std::abs (trace[i] - trace[i - 1]) > 0.05f && (i < 2 || std::abs (trace[i - 1] - trace[i - 2]) < 0.05f)) ++changes;
+        CHECK (changes >= 7 && changes <= 9, "with Live stopped, motion keeps time on the internal clock");
+        ph.playing = true;
+
+        // Orbit: smooth, no hops; no clicks in the audio.
+        set ("spatialMode", 2.0f); set ("motionDiv", 4.0f);   // Orbit, one revolution per beat
+        juce::AudioBuffer<float> orbitOut (2, 256 * 300), tmp (2, 256);
+        for (int k = 0; k < 300; ++k)
+        {
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            p.processBlock (tmp, m); ph.ppq += 256.0 / spb;
+            for (int ch = 0; ch < 2; ++ch) orbitOut.copyFrom (ch, k * 256, tmp, ch, 0, 256);
+        }
+        set ("spatialMode", 1.0f); set ("motionDiv", 6.0f);   // Bounce at 1/16: the busiest hopping
+        juce::AudioBuffer<float> bounceOut (2, 256 * 300);
+        for (int k = 0; k < 300; ++k)
+        {
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            p.processBlock (tmp, m); ph.ppq += 256.0 / spb;
+            for (int ch = 0; ch < 2; ++ch) bounceOut.copyFrom (ch, k * 256, tmp, ch, 0, 256);
+        }
+        set ("spatialMode", 0.0f);
+        juce::AudioBuffer<float> still (2, 256 * 300);
+        for (int k = 0; k < 300; ++k)
+        {
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            p.processBlock (tmp, m); ph.ppq += 256.0 / spb;
+            for (int ch = 0; ch < 2; ++ch) still.copyFrom (ch, k * 256, tmp, ch, 0, 256);
+        }
+        std::printf ("       max step: radiate %.4f, orbit %.4f, bounce 1/16 %.4f\n", maxJump (still), maxJump (orbitOut), maxJump (bounceOut));
+        CHECK (maxJump (orbitOut) < maxJump (still) * 1.3f && maxJump (bounceOut) < maxJump (still) * 1.3f, "moving voices around: no clicks");
+        p.setPlayHead (nullptr);
     }
 
     std::printf ("milestone 1 sets still open\n");

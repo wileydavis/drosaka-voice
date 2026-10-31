@@ -58,6 +58,12 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> spreadAttachment, snapAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> chordAttachment;
     juce::Rectangle<int> spreadArea() const;
+
+    // Space & time strip.
+    juce::ComboBox spatialBox, motionBox, quantBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> spatialAttachment, motionAttachment, quantAttachment;
+    juce::Rectangle<int> spaceArea() const;
+    juce::Rectangle<int> fieldArea() const;
     juce::Viewport listView;
     juce::Component listContent;
     std::vector<std::unique_ptr<VoiceRow>> rows;

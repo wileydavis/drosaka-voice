@@ -1,11 +1,11 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <limits>
 
 namespace
 {
     constexpr double fadeMs = 3.0;          // retrigger crossfade, start/end fades
     constexpr double gainGlideSec = 0.05;   // crowd gain: full 0->1 move takes 50 ms
-    constexpr double panGlideSec = 0.10;    // pan: full L->R move takes 100 ms
     constexpr double encodeGlideSec = 0.03; // dry <-> codec crossfade
     constexpr int peakBins = 1024;
     constexpr double maxStemSeconds = 120.0;
@@ -34,6 +34,9 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     spreadParam = params.getRawParameterValue ("spread");
     chordParam = params.getRawParameterValue ("chord");
     snapParam = params.getRawParameterValue ("snap");
+    spatialParam = params.getRawParameterValue ("spatialMode");
+    motionDivParam = params.getRawParameterValue ("motionDiv");
+    encodeQuantParam = params.getRawParameterValue ("encodeQuant");
     bitRateParam = params.getRawParameterValue ("bitRate");
     frameDropParam = params.getRawParameterValue ("frameDrop");
     pitchLockParam = params.getRawParameterValue ("pitchLock");
@@ -76,6 +79,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "chord", 1 }, "Spread chord", chordNames, 1));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "snap", 1 }, "Spread snap",
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.3f, pct));
+
+    // Space and time (M6).
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "spatialMode", 1 }, "Spatial mode", spatial::modeNames(), 0));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "motionDiv", 1 }, "Motion rate", spatial::divisionNames(), 4));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "encodeQuant", 1 }, "Encode quantise", spatial::quantiseNames(), 0));
     return layout;
 }
 
@@ -441,14 +449,56 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     Bank& b = *bank;
     const int n = juce::jmin (b.size(), maxVoices);
 
-    // Crowd and codec targets for this block.
-    float tg[maxVoices], tp[maxVoices], te[maxVoices];
-    computeCrowd (b, countParam->load() * (float) n, tg, tp);
+    // Crowd targets for this block (encode and pans are per chunk: they follow the grid).
+    float tg[maxVoices], tpRadiate[maxVoices], tp[maxVoices], te[maxVoices];
+    computeCrowd (b, countParam->load() * (float) n, tg, tpRadiate);
     int ranks[maxVoices];
-    computeEncode (b, encodeParam->load(), tg, te, ranks);
     int audible = 0;
-    for (int s = 0; s < n; ++s) { voiceRank[s] = ranks[s]; audible += ranks[s] > 0 ? 1 : 0; }
+    for (int s = 0; s < n; ++s) audible += tg[s] > 0.0f ? 1 : 0;
     audibleVoices = audible;
+
+    // Musical clock: Live's transport when playing, otherwise an internal clock at the
+    // last tempo, so motion keeps moving while stopped. Output is 'latency' late (Live
+    // compensates), so grid events are placed on the musical time of the OUTPUT sample.
+    double bpm = lastBpm;
+    bool playing = false;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            if (auto t = pos->getBpm()) bpm = juce::jlimit (20.0, 400.0, *t);
+            playing = pos->getIsPlaying();
+            if (playing)
+                if (auto q = pos->getPpqPosition()) internalPpq = *q;
+        }
+    lastBpm = bpm;
+    hostBpm = (float) bpm;
+    hostPlaying = playing;
+    const double spb = hostRate * 60.0 / bpm;            // samples per beat
+    const double ppq0 = internalPpq - latency / spb;     // musical time of this block's first output sample
+    internalPpq += numSamples / spb;
+
+    const int mode = juce::jlimit (0, 3, (int) spatialParam->load());
+    const double motionGrid = spatial::divisionBeats ((int) motionDivParam->load());
+    const double encodeGrid = spatial::quantiseBeats ((int) encodeQuantParam->load());
+    const float encodeKnob = encodeParam->load();
+
+    // Split points: every grid line inside this block, so changes land exactly on it.
+    int splits[96], numSplits = 0;
+    double grids[2];
+    int numGrids = 0;
+    if (mode == spatial::bounce || mode == spatial::swap) grids[numGrids++] = motionGrid;   // stepwise motion
+    if (encodeGrid > 0.0) grids[numGrids++] = encodeGrid;
+    for (int gi = 0; gi < numGrids; ++gi)
+    {
+        const double g = grids[gi];
+        for (double line = (std::floor (ppq0 / g) + 1.0) * g; ; line += g)
+        {
+            const int at = (int) std::ceil ((line - ppq0) * spb);
+            if (at >= numSamples || numSplits >= 96) break;
+            if (at > 0) splits[numSplits++] = at;
+        }
+    }
+    std::sort (splits, splits + numSplits);
 
     // Spread targets (semitones): full interval for the codec, folded +-7 for dry voices.
     float tCodecSemis[maxVoices], tDrySemis[maxVoices];
@@ -463,9 +513,35 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     auto* outR = buffer.getWritePointer (1);
     auto midiIt = midi.cbegin();
 
-    for (int chunkStart = 0; chunkStart < numSamples; chunkStart += chunkSize)
+    int nextSplit = 0;
+    for (int chunkStart = 0, num = 0; chunkStart < numSamples; chunkStart += num)
     {
-        const int num = juce::jmin (chunkSize, numSamples - chunkStart);
+        while (nextSplit < numSplits && splits[nextSplit] <= chunkStart) ++nextSplit;
+        num = juce::jmin (chunkSize, numSamples - chunkStart);
+        if (nextSplit < numSplits) num = juce::jmin (num, splits[nextSplit] - chunkStart);
+
+        // Where we are on the grid at the start of this chunk.
+        const double ppqNow = ppq0 + chunkStart / spb;
+
+        // Encode: continuous, or latched to whole voices on each grid line.
+        float encodeFraction = encodeKnob;
+        if (encodeGrid > 0.0)
+        {
+            const auto stepIdx = (juce::int64) std::floor (ppqNow / encodeGrid + 1e-7);
+            if (stepIdx != lastEncodeStep)
+            {
+                lastEncodeStep = stepIdx;
+                latchedEncodeVoices = std::floor (encodeKnob * (float) audible + 1e-4f);
+            }
+            encodeFraction = audible > 0 ? juce::jmin (latchedEncodeVoices, (float) audible) / (float) audible : 0.0f;
+        }
+        else lastEncodeStep = std::numeric_limits<juce::int64>::min();
+        computeEncode (b, encodeFraction, tg, te, ranks);
+
+        // Spatial targets.
+        const auto motionStep = (juce::int64) std::floor (ppqNow / motionGrid + 1e-7);
+        const double cycle = ppqNow / motionGrid - std::floor (ppqNow / motionGrid);
+        spatial::pans (mode, b, tpRadiate, tg, motionStep, cycle, tp);
 
         // Spread glides (an octave takes 80 ms at most), and whether each voice needs PSOLA.
         const float semiStep = (float) (12.0 * num / (0.08 * hostRate));
@@ -505,7 +581,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
         // Glide each voice toward its targets over this chunk.
         const float gStep = (float) (num / (gainGlideSec * hostRate));
-        const float pStep = (float) (2.0 * num / (panGlideSec * hostRate));
+        const float pStep = (float) (2.0 * num / (spatial::panGlideSeconds (mode) * hostRate));
         const float eStep = (float) (num / (encodeGlideSec * hostRate));
         const float invNum = 1.0f / (float) num;
 
@@ -551,8 +627,10 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    for (int s = 0; s < n; ++s) voiceRank[s] = ranks[s];
     for (int s = 0; s < n; ++s)
     {
+        voicePan[s] = b.stems[(size_t) s]->curPan;
         voiceLevel[s] = b.stems[(size_t) s]->curGain;
         voiceEncode[s] = voiceDsp[s].encode;
         voiceSemis[s] = voiceDsp[s].drySemis + voiceDsp[s].encode * (voiceDsp[s].codecSemis - voiceDsp[s].drySemis);

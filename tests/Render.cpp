@@ -97,11 +97,67 @@ static int renderSpread (int argc, char** argv)
     return 0;
 }
 
+// Space tour at 120 bpm: DrosakaVoiceRender --space <out.wav> <primary> <stems...>
+// Loops: Radiate, Bounce 1/8, Orbit (1 bar per revolution), Swap 1/4, then Bounce 1/16
+// with Encode stepping one voice per beat (quantised to 1/4) while the knob ramps.
+struct RenderPlayHead : juce::AudioPlayHead
+{
+    double ppq = 0.0;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p; p.setBpm (120.0); p.setPpqPosition (ppq); p.setIsPlaying (true); return p;
+    }
+};
+
+static int renderSpace (int argc, char** argv)
+{
+    const double rate = 48000.0, spb = rate / 2.0;
+    DrosakaVoiceProcessor p;
+    p.prepareToPlay (rate, 512);
+    RenderPlayHead ph; p.setPlayHead (&ph);
+    juce::StringArray paths, errs;
+    for (int i = 3; i < argc; ++i) paths.add (juce::File (argv[i]).getFullPathName());
+    p.addStems (paths, errs);
+    auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+    set ("count", 1.0f); set ("bitRate", 0.45f);
+
+    const int loopLen = (int) (spb * 8);   // two bars per loop
+    const int loops = 5, total = loopLen * loops + p.getLatencySamples() + (int) rate;
+    juce::AudioBuffer<float> out (2, total), block (2, 512);
+    for (int pos = 0; pos < total; pos += 512)
+    {
+        const int loop = juce::jmin (loops - 1, pos / loopLen);
+        const float within = (float) (pos - loop * loopLen) / (float) loopLen;
+        const float modes[] = { 0, 1, 2, 3, 1 }, divs[] = { 4, 5, 2, 4, 6 };
+        set ("spatialMode", modes[loop]);
+        set ("motionDiv", divs[loop]);
+        set ("encodeQuant", loop == 4 ? 3.0f : 0.0f);
+        set ("encodeCount", loop == 4 ? within : 0.0f);
+        juce::MidiBuffer midi;
+        for (int l = 0; l < loops; ++l)
+            if (l * loopLen >= pos && l * loopLen < pos + 512)
+                midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), l * loopLen - pos);
+        p.processBlock (block, midi);
+        ph.ppq += 512.0 / spb;
+        const int m = juce::jmin (512, total - pos);
+        for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, pos, block, ch, 0, m);
+    }
+    const juce::File f (argv[2]);
+    f.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), rate, 2, 24, {}, 0));
+    w->writeFromAudioSampleBuffer (out, p.getLatencySamples(), total - p.getLatencySamples());
+    std::printf ("wrote %s, peak %.2f\n", f.getFullPathName().toRawUTF8(), out.getMagnitude (0, total));
+    p.setPlayHead (nullptr);
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
     if (argc >= 4 && juce::String (argv[1]) == "--build") return renderBuild (argc, argv);
     if (argc >= 4 && juce::String (argv[1]) == "--spread") return renderSpread (argc, argv);
+    if (argc >= 4 && juce::String (argv[1]) == "--space") return renderSpace (argc, argv);
     if (argc >= 4 && juce::String (argv[1]) == "--align")
     {
         // --align ref.wav other.wav ... : print the offset each would get against ref

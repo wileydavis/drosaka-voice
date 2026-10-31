@@ -23,6 +23,7 @@ How many voices sound (0 to all), building symmetrically outward from the primar
   [decided Oct 30, M2] "Outward" = neighbours in the sorted array, nearest first; at the array's edge the window extends on the side that has voices. Each pair fades in together as the knob turns (continuous, no steps). Overall level is normalised as voices are added (gain ÷ √(sum of squared voice gains)) so loudness stays roughly even. Until Spatial mode exists (M6), each pair pans wider the further it sits from the primary, lower-sorted member to the left (interim "radiate").
 Spatial mode
 How chosen voices arrange in the stereo field: radiate from center, bounce around, others TBD; tempo-synced where motion is involved
+  [decided Oct 30, M6] Modes as built — Radiate (pairs fan out, wider with distance); Bounce (every division each audible voice hops to a new slot; slots evenly spaced edge to edge and re-dealt per division from a fixed seed, so the same bar always looks the same); Orbit (voices circle the field, one revolution per division) and Swap (the radiate layout mirrors L<->R every division) are Claude's proposals for "others TBD" — keep, change or cut. Primary stays dead centre in every mode. Rate menu: 4 bars … 1/16, plus 1/4T 1/8T 1/16T. Pure panning for now (depth cues still open). Hops glide 15 ms.
 Encode count
 Spreads the codec across the voices, 0 to all, one voice at a time at full strength; order is a fixed-seed random scatter across the field so it jumps around the head; the primary voice is always last
   [decided Oct 30, M4] Order alternates left/right of the primary (by sorted-array side, which is also the panning side), random within each side from a fixed seed; primary last. Encode counts only the audible voices (inside the Count window and not muted, or soloed): 0–100% = 0 to all audible voices, taken in the fixed order filtered to those voices, so every step is heard (Wiley, Oct 30). A voice's place in line can shift as Count changes; changes glide. Silent voices wait dry, except at 100% where everything is encoded so voices fading in arrive on the codec.
@@ -50,6 +51,7 @@ It is an instrument, not an effect: it sits on a MIDI track and plays on notes.
 • Trigger: a MIDI note fires playback; note pitch does not transpose, trigger only
 • Slicing: manual slice markers on the phrase; each slice maps to a key; because all stems are aligned, one marker cuts every voice, so one key fires that word across the whole crowd
 • Tempo sync (in v1): the device reads Live's transport; spatial motion (bounce etc.) can lock to note divisions, and the encode-count stepping can quantize to the beat instead of free-running
+  [decided Oct 30, M6] Grid events land on the musical time of the output (the ~39 ms latency is subtracted, matching Live's compensation). With Live stopped, an internal clock at the last tempo keeps motion running. Encode steps (Free, 1/16 … 1 bar): on each grid line the encoded count latches to the whole number of voices the knob asks for, so voices flip on the beat (several at once if the knob jumped).
 • Presets: bank + slices + knob states saved with embedded audio
 • Crowd/codec knobs stay live while playing, so a performance can grow and infect the crowd in real time
 Pattern mode (tempo-synced retrigger)
@@ -78,7 +80,7 @@ Technical notes and open questions
 Build in JUCE, ship AU and VST3 from one codebase (Ableton on Mac loads both; Windows loads VST3 only). Codec core: LPC analysis around 10th order at 8 kHz, hard-quantized coefficients, resynthesis with a pulse or saw excitation; quantization and frame drop are what make it sound like radio rather than a vocoder.
 Reference sounds for the codec: LPC-10 and STANAG 4591 MELP demos (YouTube); musical cousins are Kraftwerk "Numbers" and Laurie Anderson "O Superman". Reference for chopped vocal technique: Green Velvet "Flash", Blawan "Why They Hide Their Bodies Under My Garage".
 Open questions:
-[ ] Full list of spatial modes beyond radiate and bounce
+[~] Full list of spatial modes beyond radiate and bounce — Orbit and Swap proposed (M6), awaiting Wiley's ear
 [ ] Depth cues for outer voices (level, short delay, reverb) or pure panning
 [ ] Should a dry primary-voice path be available after the codec stage
 [ ] Does the primary stay dry at the drop by automation, or by a dedicated "solo primary" trigger

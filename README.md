@@ -28,9 +28,31 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 2 Voice bank | ✅ done — tested in Live, works |
 | 3 Codec, single voice | ✅ done — tested in Live, sounds good |
 | 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
-| 5 Spread (+ stem alignment) | Written and passing offline tests. **Awaiting ear test in Live** |
-| 6 Spatial modes + tempo sync | not started |
+| 5 Spread (+ stem alignment) | ✅ done — tested in Live, sounds great |
+| 6 Spatial modes + tempo sync | Written and passing offline tests. **Awaiting ear test in Live** |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Milestone 6 behaviour (as built)
+
+- **SPACE** picks how the audible voices sit in the stereo field. The primary always stays dead centre
+  - **Radiate:** pairs fan out from the centre, wider with distance
+  - **Bounce:** on every division, each voice hops to a new place. The crowd stays spread edge to edge, and the same bar always bounces the same way
+  - **Orbit:** voices circle the field, one revolution per division
+  - **Swap:** the field mirrors left and right on every division
+- **RATE** sets the division: 4 bars down to 1/16, plus triplets
+- **ENCODE STEPS:** Free, or 1/16 to 1 bar. Quantised, the codec takes voices only on grid lines, so a ramped Encode knob infects the crowd one voice per beat
+- **Tempo:** follows Live's tempo and position, and the timing accounts for the plugin's latency so changes land on the beat as you hear it. With Live stopped, an internal clock keeps motion running. The readout shows which clock is in charge
+- **Field view:** a small stereo-field display shows each audible voice as a dot. Orange is the primary, teal is encoded
+
+Space tour without Live: `DrosakaVoiceRender --space out.wav primary.wav others...` renders Radiate, Bounce 1/8, Orbit, Swap 1/4, then Bounce 1/16 with Encode stepping on the beat.
+
+### Milestone 6 test in Live
+
+1. With the transport running, try each **SPACE** mode at a few **RATES**: hops should land on the grid alongside your drums
+2. **ENCODE STEPS** at 1/4: ramp Encode over 8 bars, and voices should flip exactly on beats
+3. Stop the transport: motion keeps going on the internal clock
+4. Change Live's tempo: the motion follows
+5. Judgement calls: keep Orbit and Swap? Add depth cues (level, short delay, reverb on outer voices), or stay with pure panning?
 
 ### Milestone 5 behaviour (as built)
 

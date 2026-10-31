@@ -285,11 +285,26 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     addAndMakeVisible (chordBox);
     chordAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.params, "chord", chordBox);
 
+    // Space & time strip.
+    auto setupBox = [this] (juce::ComboBox& box, const juce::StringArray& items, const char* paramId,
+                            std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>& att)
+    {
+        box.addItemList (items, 1);
+        box.setColour (juce::ComboBox::backgroundColourId, colours::row);
+        box.setColour (juce::ComboBox::outlineColourId, colours::row);
+        box.setColour (juce::ComboBox::textColourId, colours::wave);
+        addAndMakeVisible (box);
+        att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.params, paramId, box);
+    };
+    setupBox (spatialBox, spatial::modeNames(), "spatialMode", spatialAttachment);
+    setupBox (motionBox, spatial::divisionNames(), "motionDiv", motionAttachment);
+    setupBox (quantBox, spatial::quantiseNames(), "encodeQuant", quantAttachment);
+
     listView.setViewedComponent (&listContent, false);
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (860, 720);
+    setSize (860, 796);
     startTimerHz (30);
 }
 
@@ -364,6 +379,8 @@ void DrosakaVoiceEditor::timerCallback()
         repaint (waveArea());
     }
     for (auto& r : rows) r->repaint();
+    repaint (fieldArea());
+    repaint (spaceArea().withTrimmedRight (240));
 }
 
 void DrosakaVoiceEditor::updateTimeline()
@@ -400,6 +417,17 @@ juce::Rectangle<int> DrosakaVoiceEditor::spreadArea() const
     return codecArea().translated (0, 76);
 }
 
+juce::Rectangle<int> DrosakaVoiceEditor::spaceArea() const
+{
+    return spreadArea().translated (0, 76);
+}
+
+juce::Rectangle<int> DrosakaVoiceEditor::fieldArea() const
+{
+    auto a = spaceArea().reduced (10, 8);
+    return a.removeFromRight (230);
+}
+
 void DrosakaVoiceEditor::resized()
 {
     addButton.setBounds (getWidth() - 16 - 120, 14, 120, 26);
@@ -421,7 +449,12 @@ void DrosakaVoiceEditor::resized()
     chordBox.setBounds (sa.getX() + 200, sa.getCentreY() - 6, 150, 26);
     snapKnob.setBounds (sa.getX() + 400, sa.getY() + 8, 46, 46);
 
-    listView.setBounds (16, sa.getBottom() + 34, getWidth() - 32, getHeight() - sa.getBottom() - 34 - 30);
+    auto xa = spaceArea();
+    spatialBox.setBounds (xa.getX() + 10, xa.getY() + 28, 120, 26);
+    motionBox.setBounds (xa.getX() + 140, xa.getY() + 28, 90, 26);
+    quantBox.setBounds (xa.getX() + 270, xa.getY() + 28, 90, 26);
+
+    listView.setBounds (16, xa.getBottom() + 34, getWidth() - 32, getHeight() - xa.getBottom() - 34 - 30);
     const int rowH = 34;
     listContent.setSize (listView.getMaximumVisibleWidth(), juce::jmax (1, (int) rows.size() * rowH));
     for (size_t i = 0; i < rows.size(); ++i)
@@ -537,6 +570,46 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawText (sn < 0.05f ? "portamento" : sn > 0.9f ? "near-stepped" : juce::String (juce::roundToInt (sn * 100)) + "% linger",
                     snapKnob.getRight() + 8, sa.getY() + 28, 100, 14, juce::Justification::centredLeft);
         g.drawText ("dry voices +-7 st, codec plays the rest", sa.getRight() - 250, sa.getY() + 6, 240, 14, juce::Justification::centredRight);
+    }
+
+    // Space & time strip, with a live view of the stereo field.
+    {
+        auto xa = spaceArea();
+        g.setColour (colours::panel);
+        g.fillRoundedRectangle (xa.toFloat(), 6.0f);
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (colours::wave);
+        g.drawText ("SPACE", spatialBox.getX(), xa.getY() + 8, 120, 14, juce::Justification::centredLeft);
+        g.drawText ("RATE", motionBox.getX(), xa.getY() + 8, 90, 14, juce::Justification::centredLeft);
+        g.drawText ("ENCODE STEPS", quantBox.getX(), xa.getY() + 8, 100, 14, juce::Justification::centredLeft);
+        g.setColour (colours::dim);
+        g.drawText (juce::String (proc.hostBpm.load(), 1) + " bpm  " + (proc.hostPlaying.load() ? "Live" : "internal clock"),
+                    quantBox.getRight() + 16, xa.getY() + 34, 160, 14, juce::Justification::centredLeft);
+
+        auto f = fieldArea();
+        g.setColour (colours::bg);
+        g.fillRoundedRectangle (f.toFloat(), 4.0f);
+        g.setColour (colours::row);
+        g.drawVerticalLine (f.getCentreX(), (float) f.getY() + 2, (float) f.getBottom() - 2);
+        g.setColour (colours::dim);
+        g.drawText ("L", f.reduced (4, 0), juce::Justification::centredLeft);
+        g.drawText ("R", f.reduced (4, 0), juce::Justification::centredRight);
+        if (shownBank != nullptr)
+        {
+            const int nv = shownBank->size();
+            for (int r = 0; r < nv; ++r)
+            {
+                const int idx = shownBank->sorted[(size_t) r];
+                const float lvl = proc.getVoiceLevel (idx);
+                if (lvl <= 0.01f) continue;
+                const float x = (float) f.getCentreX() + proc.getVoicePan (idx) * (float) (f.getWidth() / 2 - 14);
+                const float y = (float) f.getBottom() - 6.0f - (float) (f.getHeight() - 12) * (nv > 1 ? (float) r / (float) (nv - 1) : 0.5f);
+                const auto c = idx == shownBank->primary ? colours::accent
+                                                         : colours::wave.interpolatedWith (colours::codec, proc.getVoiceEncode (idx));
+                g.setColour (c.withAlpha (0.4f + 0.6f * juce::jmin (1.0f, lvl * 1.5f)));
+                g.fillEllipse (x - 4.0f, y - 3.0f, 8.0f, 6.0f);
+            }
+        }
     }
 
     // Count readout.

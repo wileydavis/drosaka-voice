@@ -3,9 +3,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <atomic>
+#include <limits>
 #include "Bank.h"
 #include "LpcCodec.h"
 #include "Spread.h"
+#include "Spatial.h"
 
 //==============================================================================
 // Voice bank (M2) + codec (M3).
@@ -89,6 +91,12 @@ public:
         return stemIndex >= 0 && stemIndex < maxVoices ? voiceRank[stemIndex].load() : 0;
     }
     std::atomic<int> audibleVoices { 0 };
+    std::atomic<float> hostBpm { 120.0f };
+    std::atomic<bool> hostPlaying { false };
+    float getVoicePan (int stemIndex) const
+    {
+        return stemIndex >= 0 && stemIndex < maxVoices ? voicePan[stemIndex].load() : 0.0f;
+    }
 
     // Current pitch offset per stem (semitones, as heard: dry/codec blend), for the UI.
     float getVoiceSemis (int stemIndex) const
@@ -159,6 +167,13 @@ private:
     std::atomic<float>* chordParam = nullptr;
     std::atomic<float>* snapParam = nullptr;
     std::atomic<float> voiceSemis[maxVoices] {};
+    std::atomic<float> voicePan[maxVoices] {};
+    std::atomic<float>* spatialParam = nullptr;
+    std::atomic<float>* motionDivParam = nullptr;
+    std::atomic<float>* encodeQuantParam = nullptr;
+    double internalPpq = 0.0, lastBpm = 120.0;
+    juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
+    float latchedEncodeVoices = 0.0f;
     std::vector<float> codecOut = std::vector<float> (chunkSize);
     int latency = 0;
 
