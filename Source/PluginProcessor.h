@@ -5,6 +5,7 @@
 #include <atomic>
 #include "Bank.h"
 #include "LpcCodec.h"
+#include "Spread.h"
 
 //==============================================================================
 // Voice bank (M2) + codec (M3).
@@ -89,6 +90,12 @@ public:
     }
     std::atomic<int> audibleVoices { 0 };
 
+    // Current pitch offset per stem (semitones, as heard: dry/codec blend), for the UI.
+    float getVoiceSemis (int stemIndex) const
+    {
+        return stemIndex >= 0 && stemIndex < maxVoices ? voiceSemis[stemIndex].load() : 0.0f;
+    }
+
     // Bumped whenever the bank changes. structureGeneration only when rows must be
     // rebuilt (not for offset drags, which would otherwise kill the drag mid-gesture).
     std::atomic<int> bankGeneration { 0 };
@@ -103,6 +110,16 @@ private:
         std::vector<float> delay;   // dry path, delayed by the codec latency
         int delayPos = 0;
         float encode = 0.0f;        // smoothed 0 = dry .. 1 = codec
+        float drySemis = 0.0f, codecSemis = 0.0f;   // smoothed Spread intervals
+        float psolaMix = 0.0f;      // 0 = direct playback .. 1 = pitch-shifted (PSOLA)
+    };
+
+    struct Grain { double synthCenter, srcCenter, half; float gain; };
+    struct Psola
+    {
+        double nextSynth = 0.0;     // host samples since trigger
+        Grain grains[8];
+        int count = 0;
     };
 
     struct Instance   // one triggered playback of the whole bank
@@ -110,13 +127,15 @@ private:
         bool active = false;
         double t = 0.0;          // host samples since trigger
         float env = 0.0f, envTarget = 0.0f, envStep = 0.0f;
+        Psola psola[maxVoices];
     };
 
     Stem::Ptr importStem (const juce::File&, juce::String& error);
     void swapBank (Bank::Ptr, bool structural = true);
     void autoAlign (Bank& b, int stemIndex);
     void startInstance();
-    void renderDry (int start, int num, Bank& bank);   // all stems, mono, into dryBuf
+    // All stems, mono: direct playback into dryBuf, pitch-shifted into shiftBuf where asked.
+    void renderDry (int start, int num, Bank& bank, const float* psolaRatio, const bool* wantPsola);
 
     juce::AudioFormatManager formatManager;
 
@@ -134,6 +153,12 @@ private:
 
     VoiceDsp voiceDsp[maxVoices];
     juce::AudioBuffer<float> dryBuf { maxVoices, chunkSize };
+    juce::AudioBuffer<float> shiftBuf { maxVoices, chunkSize };
+    float envBuf[chunkSize] {};
+    std::atomic<float>* spreadParam = nullptr;
+    std::atomic<float>* chordParam = nullptr;
+    std::atomic<float>* snapParam = nullptr;
+    std::atomic<float> voiceSemis[maxVoices] {};
     std::vector<float> codecOut = std::vector<float> (chunkSize);
     int latency = 0;
 

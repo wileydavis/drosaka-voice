@@ -50,6 +50,14 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> encodeAttachment, bitRateAttachment, frameDropAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> pitchLockAttachment;
     juce::Rectangle<int> codecArea() const;
+
+    // Spread strip.
+    juce::Slider spreadKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider snapKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::ComboBox chordBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> spreadAttachment, snapAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> chordAttachment;
+    juce::Rectangle<int> spreadArea() const;
     juce::Viewport listView;
     juce::Component listContent;
     std::vector<std::unique_ptr<VoiceRow>> rows;

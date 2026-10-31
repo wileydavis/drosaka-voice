@@ -28,9 +28,29 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 2 Voice bank | ✅ done — tested in Live, works |
 | 3 Codec, single voice | ✅ done — tested in Live, sounds good |
 | 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
-| 5 Spread | in progress — stem alignment (added) is done and awaiting a test |
+| 5 Spread (+ stem alignment) | Written and passing offline tests. **Awaiting ear test in Live** |
 | 6 Spatial modes + tempo sync | not started |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Milestone 5 behaviour (as built)
+
+- **SPREAD** (automatable) moves the crowd from unison to chorus to chord to cluster. Every voice glides continuously, and the primary never moves
+- **CHORD:** Fifths, Minor triad, Major triad, Stacked fourths, Minor 7th or Octaves. Voices above the primary take the chord's upper tones and voices below take its lower ones, with the outer pairs widest
+- **SNAP:** 0 is pure portamento; higher values linger on each station and rush between them
+- **Dry voices** are pitch-shifted per pitch period (PSOLA), which keeps the voice's formants and timing. They stay within ±7 semitones, so wider chord tones are folded down an octave
+- **Encoded voices** play the full interval through the codec, up to ±24. A voice can therefore jump an octave at the moment it's encoded: "the codec covers the rest"
+- Each row shows its current interval in semitones
+
+Spread tour without Live: `DrosakaVoiceRender --spread out.wav primary.wav others...` renders unison, chorus, chord, cluster, a slow sweep, then the encoded chord.
+
+### Milestone 5 test in Live
+
+1. Load a bank, set Count to all, and sweep **SPREAD** slowly while the phrase plays: chorus, then chord, then cluster, with no steps
+2. Try each **CHORD** set at the chord position. Do the voicings sound right?
+3. **SNAP** up: the crowd should sit on each station and dart between them
+4. Listen to a single non-primary voice (solo it) at a wide setting: is the PSOLA shift acceptable on your real ElevenLabs voices?
+5. The spec's typical build: automate **SPREAD** and **ENCODE** together over 8–16 bars
+6. Judgement call: the octave jump when a voice gets encoded at a wide chord tone. Keep it, or match the dry pitch?
 
 ### Stem alignment (added to Milestone 5)
 

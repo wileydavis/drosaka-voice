@@ -23,6 +23,7 @@ struct Stem : public juce::ReferenceCountedObject
     std::vector<float> peaks;         // min/max pairs for drawing
     StemAnalysis analysis;
     std::vector<float> alignEnv;      // syllable-rhythm envelope for auto-alignment
+    PitchMarks marks;                 // for PSOLA pitch shifting (Spread)
 
     float curGain = 0.0f;             // audio thread only
     float curPan = 0.0f;              // audio thread only

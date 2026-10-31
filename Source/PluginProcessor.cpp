@@ -31,6 +31,9 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     formatManager.registerBasicFormats();
     countParam = params.getRawParameterValue ("count");
     encodeParam = params.getRawParameterValue ("encodeCount");
+    spreadParam = params.getRawParameterValue ("spread");
+    chordParam = params.getRawParameterValue ("chord");
+    snapParam = params.getRawParameterValue ("snap");
     bitRateParam = params.getRawParameterValue ("bitRate");
     frameDropParam = params.getRawParameterValue ("frameDrop");
     pitchLockParam = params.getRawParameterValue ("pitchLock");
@@ -57,6 +60,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "pitchLock", 1 }, "Codec pitch lock",
         juce::StringArray { "Fixed", "Free", "Tracking" }, 2));
+
+    // Spread.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "spread", 1 }, "Spread",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+        {
+            const char* names[] = { "unison", "chorus", "chord", "cluster" };
+            const float p = v * 3.0f;
+            const int i = juce::jmin (3, juce::roundToInt (p));
+            return std::abs (p - (float) i) < 0.05f ? juce::String (names[i]) : juce::String (juce::roundToInt (v * 100.0f)) + "%";
+        })));
+    juce::StringArray chordNames;
+    for (int i = 0; i < spread::numChordSets; ++i) chordNames.add (spread::chordSets()[i].name);
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "chord", 1 }, "Spread chord", chordNames, 1));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "snap", 1 }, "Spread snap",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.3f, pct));
     return layout;
 }
 
@@ -83,6 +102,7 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
         d.delay.assign ((size_t) ringLen, 0.0f);
         d.delayPos = 0;
         d.encode = 0.0f;
+        d.drySemis = d.codecSemis = d.psolaMix = 0.0f;
     }
 }
 
@@ -126,6 +146,7 @@ Stem::Ptr DrosakaVoiceProcessor::importStem (const juce::File& file, juce::Strin
 
     s->analysis = analyseStem (s->audio.getReadPointer (0), len, s->sampleRate);
     s->alignEnv = align::envelope (s->audio.getReadPointer (0), len, s->sampleRate);
+    s->marks = findPitchMarks (s->audio.getReadPointer (0), len, s->sampleRate);
     return s;
 }
 
@@ -289,11 +310,13 @@ void DrosakaVoiceProcessor::startInstance()
     in.env = 0.0f;
     in.envTarget = 1.0f;
     in.envStep = 1.0f / (float) fadeSamples;
+    for (auto& p : in.psola) p = {};
 }
 
-void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b)
+void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float* psolaRatio, const bool* wantPsola)
 {
     const int n = juce::jmin (b.size(), maxVoices);
+    const double lookahead = 0.025 * hostRate;   // longest grain half-length (a 40 Hz period)
 
     // Longest stem, in host samples: an instance ends when every stem has.
     double longest = 0.0;
@@ -308,48 +331,94 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b)
     {
         if (! in.active) continue;
 
+        // The instance envelope for this segment, shared by every voice.
+        for (int j = 0; j < num; ++j)
+        {
+            envBuf[j] = in.env;
+            if (! juce::exactlyEqual (in.envStep, 0.0f))
+            {
+                in.env += in.envStep;
+                if ((in.envStep > 0.0f && in.env >= in.envTarget) || (in.envStep < 0.0f && in.env <= in.envTarget))
+                { in.env = in.envTarget; in.envStep = 0.0f; }
+            }
+        }
+
         for (int s = 0; s < n; ++s)
         {
             const auto& st = *b.stems[(size_t) s];
             const float* src = st.audio.getReadPointer (0);
             float* dst = dryBuf.getWritePointer (s, start);
+            float* sdst = shiftBuf.getWritePointer (s, start);
             const int len = st.audio.getNumSamples();
             const double step = st.sampleRate / hostRate;
             const double endFadeLen = fadeSamples * step;
-
             const double offset = b.flags[(size_t) s].offsetSec * hostRate;   // alignment shift, host samples
-            float env = in.env, envStep = in.envStep;
-            const float envTarget = in.envTarget;
+
+            auto read = [&] (double pos) -> float
+            {
+                const int i0 = (int) std::floor (pos);
+                if (i0 < 0 || i0 >= len - 1) return 0.0f;
+                const float frac = (float) (pos - i0);
+                return src[i0] + frac * (src[i0 + 1] - src[i0]);
+            };
+
+            auto& ps = in.psola[s];
+            const auto& mk = st.marks;
+            const float ratio = psolaRatio[s];
 
             for (int j = 0; j < num; ++j)
             {
-                const double pos = (in.t + j - offset) * step;
-                const int i0 = (int) std::floor (pos);
-                if (i0 >= len - 1) break;
+                const double T = in.t + j;   // host samples since trigger
+                const double pos = (T - offset) * step;
+                if (pos >= len - 1) break;
+                const float edge = (float) juce::jmax (0.0, juce::jmin (1.0, (len - 1 - pos) / endFadeLen, pos / endFadeLen));
+                const float g = envBuf[j] * edge;
+                if (g <= 0.0f && ! wantPsola[s]) continue;
 
-                if (i0 >= 0)
+                dst[j] += g * read (pos);
+
+                if (! wantPsola[s] || mk.pos.empty()) continue;
+
+                // PSOLA: spawn grains ahead of time, one per synthesis pitch mark.
+                while (ps.nextSynth <= T + lookahead)
                 {
-                    const float frac = (float) (pos - i0);
-                    const float x = src[i0] + frac * (src[i0 + 1] - src[i0]);
-                    const float edge = (float) juce::jmin (1.0, (len - 1 - pos) / endFadeLen, pos / endFadeLen);
-                    dst[j] += env * juce::jmax (0.0f, edge) * x;
+                    const double srcTime = (ps.nextSynth - offset) * step;
+                    if (srcTime >= len) { ps.nextSynth += lookahead; break; }
+                    if (srcTime < 0.0) { ps.nextSynth += 0.005 * hostRate; continue; }
+
+                    // Nearest analysis mark.
+                    auto it = std::lower_bound (mk.pos.begin(), mk.pos.end(), (int) srcTime);
+                    size_t idx = (size_t) (it - mk.pos.begin());
+                    if (idx >= mk.pos.size()) idx = mk.pos.size() - 1;
+                    if (idx > 0 && std::abs (mk.pos[idx - 1] - srcTime) < std::abs (mk.pos[idx] - srcTime)) --idx;
+
+                    const bool voiced = mk.voiced[idx] != 0;
+                    const float r = voiced ? ratio : 1.0f;
+                    const double half = mk.period[idx] / step;   // one period, in host samples
+
+                    if (ps.count == 8) { for (int k = 1; k < 8; ++k) ps.grains[k - 1] = ps.grains[k]; ps.count = 7; }
+                    ps.grains[ps.count++] = { ps.nextSynth, (double) mk.pos[idx], half, voiced ? 1.0f / std::sqrt (r) : 1.0f };
+                    ps.nextSynth += half / r;
                 }
 
-                if (! juce::exactlyEqual (envStep, 0.0f))
+                // Overlap-add the live grains (Hann, two periods long).
+                float y = 0.0f;
+                int keep = 0;
+                for (int k = 0; k < ps.count; ++k)
                 {
-                    env += envStep;
-                    if ((envStep > 0.0f && env >= envTarget) || (envStep < 0.0f && env <= envTarget))
-                    { env = envTarget; envStep = 0.0f; }
+                    const auto& gr = ps.grains[k];
+                    const double d = T - gr.synthCenter;
+                    if (d >= gr.half) continue;   // finished: drop it
+                    ps.grains[keep++] = gr;
+                    if (d <= -gr.half) continue;  // not started yet
+                    const float w = 0.5f + 0.5f * std::cos (juce::MathConstants<float>::pi * (float) (d / gr.half));
+                    y += w * gr.gain * read (gr.srcCenter + d * step);
                 }
+                ps.count = keep;
+                sdst[j] += g * y;
             }
         }
 
-        if (! juce::exactlyEqual (in.envStep, 0.0f))
-        {
-            in.env += in.envStep * (float) num;
-            if ((in.envStep > 0.0f && in.env >= in.envTarget) || (in.envStep < 0.0f && in.env <= in.envTarget))
-            { in.env = in.envTarget; in.envStep = 0.0f; }
-        }
         in.t += num;
         if ((juce::exactlyEqual (in.envStep, 0.0f) && in.env <= 0.0f) || in.t >= longest) in.active = false;
     }
@@ -381,7 +450,11 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     for (int s = 0; s < n; ++s) { voiceRank[s] = ranks[s]; audible += ranks[s] > 0 ? 1 : 0; }
     audibleVoices = audible;
 
-    const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
+    // Spread targets (semitones): full interval for the codec, folded +-7 for dry voices.
+    float tCodecSemis[maxVoices], tDrySemis[maxVoices];
+    spread::compute (b, spreadParam->load(), (int) chordParam->load(), snapParam->load(), tCodecSemis, tDrySemis);
+
+        const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
     for (int s = 0; s < n; ++s)
         voiceDsp[s].codec.setParams (bitRateParam->load(), frameDropParam->load(), lock,
                                      b.stems[(size_t) s]->analysis.pitchHz);
@@ -394,8 +467,28 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     {
         const int num = juce::jmin (chunkSize, numSamples - chunkStart);
 
+        // Spread glides (an octave takes 80 ms at most), and whether each voice needs PSOLA.
+        const float semiStep = (float) (12.0 * num / (0.08 * hostRate));
+        const float mixStep = (float) (num / (0.03 * hostRate));
+        float psolaRatio[maxVoices], mix0[maxVoices], mix1[maxVoices];
+        bool wantPsola[maxVoices];
+        for (int s = 0; s < n; ++s)
+        {
+            auto& vd = voiceDsp[s];
+            vd.drySemis = approach (vd.drySemis, tDrySemis[s], semiStep);
+            vd.codecSemis = approach (vd.codecSemis, tCodecSemis[s], semiStep);
+            const float mixTarget = std::abs (tDrySemis[s]) > 0.005f || std::abs (vd.drySemis) > 0.005f ? 1.0f : 0.0f;
+            mix0[s] = vd.psolaMix;
+            vd.psolaMix = approach (vd.psolaMix, mixTarget, mixStep);
+            mix1[s] = vd.psolaMix;
+            wantPsola[s] = mix0[s] > 0.0f || mix1[s] > 0.0f;
+            psolaRatio[s] = std::exp2 (vd.drySemis / 12.0f);
+            vd.codec.setPitchRatio (std::exp2 (vd.codecSemis / 12.0f));
+        }
+
         // Dry voices, with sample-accurate triggers inside this chunk.
         dryBuf.clear (0, num);
+        shiftBuf.clear (0, num);
         int cursor = 0;
         for (; midiIt != midi.cend(); ++midiIt)
         {
@@ -404,11 +497,11 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (pos >= num) break;
             if (! meta.getMessage().isNoteOn()) continue;   // pitch, velocity, note-off ignored
             const int at = juce::jlimit (0, num, pos);
-            if (at > cursor) renderDry (cursor, at - cursor, b);
+            if (at > cursor) renderDry (cursor, at - cursor, b, psolaRatio, wantPsola);
             cursor = at;
             startInstance();
         }
-        if (cursor < num) renderDry (cursor, num - cursor, b);
+        if (cursor < num) renderDry (cursor, num - cursor, b, psolaRatio, wantPsola);
 
         // Glide each voice toward its targets over this chunk.
         const float gStep = (float) (num / (gainGlideSec * hostRate));
@@ -437,9 +530,12 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
             const int mask = (int) vd.delay.size() - 1;
             const bool silent = l0 + r0 + l1 + r1 <= 0.0f;
+            const float* shifted = shiftBuf.getReadPointer (s);
             for (int j = 0; j < num; ++j)
             {
-                vd.delay[(size_t) vd.delayPos] = dry[j];
+                // Dry output = direct playback, crossfaded to the pitch-shifted version when Spread moves it.
+                const float m = mix0[s] + (mix1[s] - mix0[s]) * (float) j * invNum;
+                vd.delay[(size_t) vd.delayPos] = wantPsola[s] ? dry[j] + m * (shifted[j] - dry[j]) : dry[j];
                 const float delayed = vd.delay[(size_t) ((vd.delayPos - latency) & mask)];
                 vd.delayPos = (vd.delayPos + 1) & mask;
                 if (silent) continue;
@@ -455,7 +551,12 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
-    for (int s = 0; s < n; ++s) { voiceLevel[s] = b.stems[(size_t) s]->curGain; voiceEncode[s] = voiceDsp[s].encode; }
+    for (int s = 0; s < n; ++s)
+    {
+        voiceLevel[s] = b.stems[(size_t) s]->curGain;
+        voiceEncode[s] = voiceDsp[s].encode;
+        voiceSemis[s] = voiceDsp[s].drySemis + voiceDsp[s].encode * (voiceDsp[s].codecSemis - voiceDsp[s].drySemis);
+    }
     for (int s = n; s < maxVoices; ++s) { voiceLevel[s] = 0.0f; voiceEncode[s] = 0.0f; }
 
     const auto& in = instances[current];

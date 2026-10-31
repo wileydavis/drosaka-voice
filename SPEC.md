@@ -44,6 +44,7 @@ One playable knob that moves the crowd from unison to chorus to chord to cluster
 • Snap sub-control shapes the curve: how strongly pitches linger on chord tones and rush through the in-between zone; 0 = pure portamento, full = near-stepped
 • Shift range limited to about ±7 semitones to keep speech artifacts tolerable; the codec covers the rest
 • Typical build: automate Spread and Encode count together over 8 to 16 bars
+  [decided Oct 30, M5] As built: stations at 0 / ⅓ / ⅔ / 1 = unison, chorus (±7–30 cents, wider and slightly irregular further out), chord, cluster (pair k at ±k semitones). Chord menu: Fifths, Minor triad (default), Major triad, Stacked fourths, Minor 7th, Octaves; up-side voices take the chord's upper tones and down-side voices its lower ones, narrow to wide; past the list they repeat an octave out. Dry voices are pitch-shifted by PSOLA (formants kept, timing kept) within ±7 st: each station is folded into ±7 by octaves and the voice glides between folded stations, so it never jumps mid-sweep. Encoded voices transpose the codec's excitation and play the full interval (up to ±24), which is "the codec covers the rest" — so a voice can land an octave away from its dry pitch when it gets encoded. Snap is a tanh curve between stations (0 linear, 1 near-stepped).
 Instrument behaviour
 It is an instrument, not an effect: it sits on a MIDI track and plays on notes.
 • Trigger: a MIDI note fires playback; note pitch does not transpose, trigger only

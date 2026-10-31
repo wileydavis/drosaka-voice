@@ -26,6 +26,9 @@ public:
     // bitRate: 0 = clean .. 1 = barely intelligible. frameDrop: 0 .. 1 (0 .. 50 % loss, bursty).
     void setParams (float bitRate, float frameDrop, PitchLock lock, float fixedPitchHz);
 
+    // Spread: transpose the excitation (the LPC envelope, i.e. the formants, stays put).
+    void setPitchRatio (float r) { pitchRatio = juce::jlimit (0.25f, 4.0f, r); }
+
     void process (const float* in, float* out, int numSamples);
 
     // Host-rate delay from input to output; the dry path is delayed by the same amount.
@@ -76,7 +79,7 @@ private:
     std::array<float, 3> pitchHistory {};
 
     // Parameters.
-    float bitRate = 0.35f, frameDrop = 0.0f, fixedPitch = 110.0f;
+    float bitRate = 0.35f, frameDrop = 0.0f, fixedPitch = 110.0f, pitchRatio = 1.0f;
     PitchLock lock = PitchLock::tracking;
 
     juce::Random rng;

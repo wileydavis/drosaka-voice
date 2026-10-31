@@ -143,3 +143,75 @@ StemAnalysis analyseStem (const float* mono, int numSamples, double sampleRate)
     result.voicedFraction = loudFrames > 0 ? (float) pitches.size() / (float) loudFrames : 0.0f;
     return result;
 }
+
+//==============================================================================
+PitchMarks findPitchMarks (const float* x, int n, double sr)
+{
+    PitchMarks m;
+    if (n <= 0) return m;
+
+    // F0 track every 10 ms at the analysis rate.
+    auto a = toAnalysisRate (x, n, sr);
+    const int an = (int) a.size();
+    const int trackHop = 160;   // 10 ms at 16 kHz
+    std::vector<float> f0;
+    std::vector<float> d ((size_t) frameLen);
+    float maxRms = 0.0f;
+    std::vector<float> rms;
+    for (int f = 0; f * trackHop + frameLen <= an; ++f)
+    {
+        double e = 0.0;
+        for (int j = 0; j < frameLen; ++j) e += (double) a[(size_t) (f * trackHop + j)] * a[(size_t) (f * trackHop + j)];
+        rms.push_back ((float) std::sqrt (e / frameLen));
+        maxRms = juce::jmax (maxRms, rms.back());
+    }
+    for (size_t f = 0; f < rms.size(); ++f)
+        f0.push_back (rms[f] > maxRms * 0.03f ? yinFrame (a.data() + f * trackHop, d) : 0.0f);
+
+    // Median-of-3 to remove single-frame octave slips.
+    for (size_t f = 1; f + 1 < f0.size(); ++f)
+        if (f0[f - 1] > 0 && f0[f] > 0 && f0[f + 1] > 0)
+        {
+            float v[3] = { f0[f - 1], f0[f], f0[f + 1] };
+            std::sort (v, v + 3);
+            f0[f] = v[1];
+        }
+
+    // f0 at a source sample: frames are centred at (f*hop + frameLen/2) in analysis samples.
+    const double toAna = anaRate / sr;
+    auto f0At = [&] (int srcPos) -> float
+    {
+        const int f = (int) std::round ((srcPos * toAna - frameLen / 2) / trackHop);
+        return (f >= 0 && f < (int) f0.size()) ? f0[(size_t) f] : 0.0f;
+    };
+
+    const int unvoicedStep = juce::jmax (1, (int) std::round (0.005 * sr));
+    int t = 0;
+    while (t < n)
+    {
+        const float hz = f0At (t);
+        if (hz > 0.0f)
+        {
+            const float P = (float) (sr / hz);
+            // Snap to the largest peak within a third of a period, so marks sit at the
+            // same point of each glottal cycle.
+            const int lo = juce::jmax (0, t - (int) (P / 3)), hi = juce::jmin (n - 1, t + (int) (P / 3));
+            int best = t < n ? t : n - 1;
+            for (int i = lo; i <= hi; ++i) if (x[i] > x[best]) best = i;
+            if (! m.pos.empty() && best <= m.pos.back()) best = m.pos.back() + juce::jmax (1, (int) (P * 0.5f));
+            if (best >= n) break;
+            m.pos.push_back (best);
+            m.period.push_back (P);
+            m.voiced.push_back (1);
+            t = best + (int) std::round (P);
+        }
+        else
+        {
+            m.pos.push_back (t);
+            m.period.push_back ((float) unvoicedStep);
+            m.voiced.push_back (0);
+            t += unvoicedStep;
+        }
+    }
+    return m;
+}

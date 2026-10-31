@@ -370,7 +370,7 @@ void LpcCodec::synthesise (const Frame& from, const Frame& to)
         float exc;
         if (to.voiced && to.pitchHz > 0.0f)
         {
-            const double period = codecRate / to.pitchHz;
+            const double period = codecRate / (to.pitchHz * pitchRatio);
             pulsePhase += 1.0 / period;
             if (pulsePhase >= 1.0) { pulsePhase -= 1.0; exc = (float) std::sqrt (period); }
             else exc = 0.0f;

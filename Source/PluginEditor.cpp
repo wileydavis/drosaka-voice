@@ -11,6 +11,7 @@ namespace colours
     const juce::Colour dim    { 0xff6b6f78 };
     const juce::Colour codec  { 0xff3fc8d0 };   // voices on the codec
     const juce::Colour warn   { 0xffe8a33d };   // couldn't auto-align
+    const juce::Colour pitch  { 0xffb58cff };   // Spread
 }
 
 namespace
@@ -101,7 +102,15 @@ public:
         if (isPrimary) { g.setColour (colours::accent); g.fillRect (c.name.reduced (0, 1).withWidth (3)); }
         g.setFont (juce::FontOptions (13.0f));
         g.setColour (colours::wave);
-        g.drawText (name, c.name.withTrimmedLeft (10), juce::Justification::centredLeft, true);
+        g.drawText (name, c.name.withTrimmedLeft (10).withTrimmedRight (40), juce::Justification::centredLeft, true);
+        const float semis = proc.getVoiceSemis (idx);
+        if (std::abs (semis) > 0.04f)
+        {
+            g.setFont (juce::FontOptions (11.0f));
+            g.setColour (colours::pitch);
+            g.drawText ((semis > 0 ? "+" : "") + juce::String (semis, std::abs (semis) < 1.0f ? 2 : 1), c.name.withTrimmedRight (4),
+                        juce::Justification::centredRight);
+        }
 
         paintLane (g, c.lane, *bank);
 
@@ -258,11 +267,29 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     addAndMakeVisible (pitchLockBox);
     pitchLockAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.params, "pitchLock", pitchLockBox);
 
+    // Spread strip.
+    for (auto* k : { &spreadKnob, &snapKnob })
+    {
+        k->setColour (juce::Slider::rotarySliderFillColourId, colours::pitch);
+        k->setColour (juce::Slider::rotarySliderOutlineColourId, colours::row);
+        k->setColour (juce::Slider::thumbColourId, colours::wave);
+        k->onValueChange = [this] { repaint (spreadArea()); };
+        addAndMakeVisible (*k);
+    }
+    spreadAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "spread", spreadKnob);
+    snapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "snap", snapKnob);
+    for (int i = 0; i < spread::numChordSets; ++i) chordBox.addItem (spread::chordSets()[i].name, i + 1);
+    chordBox.setColour (juce::ComboBox::backgroundColourId, colours::row);
+    chordBox.setColour (juce::ComboBox::outlineColourId, colours::row);
+    chordBox.setColour (juce::ComboBox::textColourId, colours::wave);
+    addAndMakeVisible (chordBox);
+    chordAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.params, "chord", chordBox);
+
     listView.setViewedComponent (&listContent, false);
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (860, 640);
+    setSize (860, 720);
     startTimerHz (30);
 }
 
@@ -368,6 +395,11 @@ juce::Rectangle<int> DrosakaVoiceEditor::codecArea() const
     return { 16, waveArea().getBottom() + 40, getWidth() - 32, 66 };
 }
 
+juce::Rectangle<int> DrosakaVoiceEditor::spreadArea() const
+{
+    return codecArea().translated (0, 76);
+}
+
 void DrosakaVoiceEditor::resized()
 {
     addButton.setBounds (getWidth() - 16 - 120, 14, 120, 26);
@@ -384,7 +416,12 @@ void DrosakaVoiceEditor::resized()
     frameDropKnob.setBounds (ca.getX() + 340, ca.getY() + 8, 46, 46);
     pitchLockBox.setBounds (ca.getX() + 490, ca.getCentreY() - 6, 120, 26);
 
-    listView.setBounds (16, ca.getBottom() + 34, getWidth() - 32, getHeight() - ca.getBottom() - 34 - 30);
+    auto sa = spreadArea();
+    spreadKnob.setBounds (sa.getX() + 10, sa.getY() + 4, 56, 56);
+    chordBox.setBounds (sa.getX() + 200, sa.getCentreY() - 6, 150, 26);
+    snapKnob.setBounds (sa.getX() + 400, sa.getY() + 8, 46, 46);
+
+    listView.setBounds (16, sa.getBottom() + 34, getWidth() - 32, getHeight() - sa.getBottom() - 34 - 30);
     const int rowH = 34;
     listContent.setSize (listView.getMaximumVisibleWidth(), juce::jmax (1, (int) rows.size() * rowH));
     for (size_t i = 0; i < rows.size(); ++i)
@@ -473,6 +510,33 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawText ("PITCH LOCK", pitchLockBox.getX(), ca.getY() + 6, 120, 14, juce::Justification::centredLeft);
         g.setColour (colours::dim);
         g.drawText ("8 kHz LPC-10", ca.getRight() - 110, ca.getY() + 6, 100, 14, juce::Justification::centredRight);
+    }
+
+    // Spread strip.
+    {
+        auto sa = spreadArea();
+        g.setColour (colours::panel);
+        g.fillRoundedRectangle (sa.toFloat(), 6.0f);
+        const float v = (float) spreadKnob.getValue();
+        const char* names[] = { "unison", "chorus", "chord", "cluster" };
+        const float pos = v * 3.0f;
+        const int near = juce::jmin (3, juce::roundToInt (pos));
+        const juce::String where = std::abs (pos - (float) near) < 0.04f ? juce::String (names[near])
+                                 : juce::String (names[juce::jmin (2, (int) pos)]) + juce::String (juce::CharPointer_UTF8 (" \xe2\x86\x92 ")) + names[juce::jmin (3, (int) pos + 1)];
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.setColour (colours::pitch);
+        g.drawText ("SPREAD", spreadKnob.getRight() + 8, sa.getY() + 12, 110, 16, juce::Justification::centredLeft);
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (colours::dim);
+        g.drawText (where, spreadKnob.getRight() + 8, sa.getY() + 30, 120, 14, juce::Justification::centredLeft);
+        g.setColour (colours::wave);
+        g.drawText ("CHORD", chordBox.getX(), sa.getY() + 6, 120, 14, juce::Justification::centredLeft);
+        g.drawText ("SNAP", snapKnob.getRight() + 8, sa.getY() + 12, 90, 14, juce::Justification::centredLeft);
+        g.setColour (colours::dim);
+        const float sn = (float) snapKnob.getValue();
+        g.drawText (sn < 0.05f ? "portamento" : sn > 0.9f ? "near-stepped" : juce::String (juce::roundToInt (sn * 100)) + "% linger",
+                    snapKnob.getRight() + 8, sa.getY() + 28, 100, 14, juce::Justification::centredLeft);
+        g.drawText ("dry voices +-7 st, codec plays the rest", sa.getRight() - 250, sa.getY() + 6, 240, 14, juce::Justification::centredRight);
     }
 
     // Count readout.

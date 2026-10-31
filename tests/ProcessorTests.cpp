@@ -543,6 +543,135 @@ int main()
                "Align all re-aligns what it can and leaves flagged voices where you put them");
     }
 
+
+    std::printf ("spread (paths)\n");
+    {
+        auto b = fakeBank ({ 100, 200, 300, 400, 500, 600, 700 }, 3);   // primary in the middle
+        float c[maxVoices], d[maxVoices];
+        spread::compute (*b, 0.0f, 1, 0.0f, c, d);
+        CHECK (*std::max_element (c, c + 7) == 0.0f && *std::min_element (c, c + 7) == 0.0f, "Spread 0 -> unison");
+        spread::compute (*b, 1.0f / 3.0f, 1, 0.0f, c, d);
+        CHECK (c[3] == 0.0f && c[2] < 0.0f && c[4] > 0.0f && std::abs (c[2]) < 0.3f && std::abs (c[0]) > std::abs (c[2]),
+               "chorus station: small detune, opposite sides, wider further out");
+        spread::compute (*b, 2.0f / 3.0f, 1, 0.0f, c, d);   // minor triad
+        CHECK (c[4] == 3.0f && c[2] == -5.0f && c[5] == 7.0f && c[1] == -9.0f && c[6] == 12.0f && c[0] == -12.0f,
+               "chord station: minor triad tones, outer voices widest");
+        CHECK (d[6] == 0.0f && d[0] == 0.0f && d[5] == 7.0f, "dry voices fold wide tones by octaves into +-7 st");
+        spread::compute (*b, 1.0f, 1, 0.0f, c, d);
+        CHECK (c[4] == 1.0f && c[5] == 2.0f && c[6] == 3.0f && c[2] == -1.0f && c[0] == -3.0f, "cluster station: a semitone apart");
+        CHECK (c[3] == 0.0f, "primary never moves");
+
+        // Continuity of both paths across the whole knob, at several Snap settings.
+        float worst = 0.0f;
+        for (float snap : { 0.0f, 0.5f, 1.0f })
+        {
+            float pc[maxVoices], pd[maxVoices];
+            spread::compute (*b, 0.0f, 1, snap, pc, pd);
+            for (int k = 1; k <= 3000; ++k)
+            {
+                spread::compute (*b, (float) k / 3000.0f, 1, snap, c, d);
+                for (int i = 0; i < 7; ++i) worst = juce::jmax (worst, std::abs (c[i] - pc[i]), std::abs (d[i] - pd[i]));
+                std::copy (c, c + 7, pc); std::copy (d, d + 7, pd);
+            }
+        }
+        std::printf ("       largest step between adjacent knob positions: %.3f st\n", worst);
+        CHECK (worst < 0.25f, "every voice glides, nothing steps (even at full Snap)");
+
+        // Snap: lingers near stations.
+        spread::compute (*b, 2.0f / 3.0f - 0.08f, 1, 1.0f, c, d);
+        const float nearChordSnap = c[6];
+        spread::compute (*b, 2.0f / 3.0f - 0.08f, 1, 0.0f, c, d);
+        CHECK (std::abs (nearChordSnap - 12.0f) < std::abs (c[6] - 12.0f) * 0.3f, "full Snap lingers on the chord tone");
+    }
+
+    std::printf ("spread (audio)\n");
+    {
+        // Syllabic harmonic tones, so PSOLA has real pitch periods and gaps to keep in time.
+        auto syllabic = [&] (float f0)
+        {
+            const int len = (int) (rate * 2.0);
+            auto t = voiceTone (f0, 0.4f, rate, len);
+            for (int i = 0; i < len; ++i)
+            {
+                const double tt = i / rate, ph = std::fmod (tt, 0.4);
+                t.setSample (0, i, t.getSample (0, i) * (tt > 0.1 && ph < 0.28 ? (float) std::sin (juce::MathConstants<double>::pi * ph / 0.28) : 0.0f));
+            }
+            return t;
+        };
+        auto fPrim = writeWav ("sp_prim.wav", syllabic (150.0f), rate);
+        auto fUp = writeWav ("sp_up.wav", syllabic (200.0f), rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fPrim.getFullPathName(), fUp.getFullPathName() }, errs);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        set ("snap", 0.0f);
+        p.setSolo (1, true);
+
+        auto render = [&] (float spreadKnob, int chord)
+        {
+            set ("spread", spreadKnob); set ("chord", (float) chord);
+            run (p, 256, 500, {});   // settle and let any phrase finish
+            auto out = run (p, 256, 400, { 0 });
+            juce::AudioBuffer<float> mono (1, out.getNumSamples());
+            for (int i = 0; i < out.getNumSamples(); ++i) mono.setSample (0, i, out.getSample (0, i) + out.getSample (1, i));
+            return mono;
+        };
+        auto pitchOf = [&] (const juce::AudioBuffer<float>& m) { return analyseStem (m.getReadPointer (0), m.getNumSamples(), rate).pitchHz; };
+        auto envLag = [&] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& c2)
+        {
+            auto env = [&] (const juce::AudioBuffer<float>& m) { std::vector<float> e; float sm = 0; for (int i = 0; i < m.getNumSamples(); ++i) { sm = 0.995f * sm + 0.005f * std::abs (m.getSample (0, i)); if (i % 48 == 0) e.push_back (sm); } return e; };
+            auto ea = env (a), ec = env (c2);
+            int best = 0; double bv = -1;
+            for (int lag = -30; lag <= 30; ++lag)
+            {
+                double acc = 0; for (int i = 40; i + 40 < (int) ea.size(); ++i) acc += ea[(size_t) i] * ec[(size_t) (i + lag)];
+                if (acc > bv) { bv = acc; best = lag; }
+            }
+            return best;   // ms
+        };
+
+        auto dry = render (0.0f, 0);
+        auto fifth = render (2.0f / 3.0f, 0);   // Fifths: the right-hand voice goes up 7
+        auto minor = render (2.0f / 3.0f, 1);   // Minor triad: up 3
+        auto clus = render (1.0f, 0);           // cluster: up 1
+        const float pd = pitchOf (dry), pf = pitchOf (fifth), pm = pitchOf (minor), pc = pitchOf (clus);
+        std::printf ("       dry %.1f Hz, fifth %.1f (want %.1f), minor 3rd %.1f (want %.1f), cluster %.1f (want %.1f)\n",
+                     pd, pf, 200 * std::exp2 (7 / 12.0), pm, 200 * std::exp2 (3 / 12.0), pc, 200 * std::exp2 (1 / 12.0));
+        CHECK (std::abs (pf - 200 * std::exp2 (7 / 12.0)) < 4.0, "PSOLA: up a fifth lands on the fifth");
+        CHECK (std::abs (pm - 200 * std::exp2 (3 / 12.0)) < 4.0, "PSOLA: up a minor third lands on it");
+        CHECK (std::abs (pc - 200 * std::exp2 (1 / 12.0)) < 3.0, "PSOLA: cluster semitone lands on it");
+
+        const int lag = envLag (dry, fifth);
+        std::printf ("       timing shift after pitching up a fifth: %d ms\n", lag);
+        CHECK (std::abs (lag) <= 5, "pitch shifting keeps the timing (syllables stay put)");
+        const double db = 20 * std::log10 (fifth.getRMSLevel (0, 0, fifth.getNumSamples()) / dry.getRMSLevel (0, 0, dry.getNumSamples()));
+        std::printf ("       level after pitching up a fifth: %+.1f dB\n", db);
+        CHECK (std::abs (db) < 2.5, "pitch shifting keeps the level within 2.5 dB");
+
+        // Codec: the full interval, past what PSOLA allows. Octaves set: +12 for this voice.
+        set ("encodeCount", 1.0f);
+        auto oct = render (2.0f / 3.0f, 5);
+        const float po = pitchOf (oct);
+        std::printf ("       encoded voice, octave up: %.1f Hz (want ~400)\n", po);
+        CHECK (std::abs (po - 400.0f) < 10.0f, "encoded voices play the full interval (an octave, beyond the dry +-7)");
+        set ("encodeCount", 0.0f);
+
+        // A slow sweep of the whole knob while the phrase plays: no clicks, no level holes.
+        set ("spread", 0.0f);
+        run (p, 256, 500, {});
+        auto sweep = run (p, 256, 400, { 0 }, [&] (int blk) { set ("spread", juce::jlimit (0.0f, 1.0f, (float) blk / 380.0f)); });
+        auto stillOut = run (p, 256, 10, {});
+        set ("spread", 2.0f / 3.0f); run (p, 256, 500, {});
+        auto steadyShift = run (p, 256, 400, { 0 });
+        set ("spread", 0.0f); run (p, 256, 500, {});
+        auto steadyDry = run (p, 256, 400, { 0 });
+        const float natural = juce::jmax (maxJump (steadyDry), maxJump (steadyShift));
+        std::printf ("       max step: steady %.4f, sweeping Spread %.4f\n", natural, maxJump (sweep));
+        CHECK (maxJump (sweep) < natural * 1.3f, "sweeping Spread mid-phrase: no clicks");
+        bool finite = true; for (int i = 0; i < sweep.getNumSamples(); ++i) finite &= std::isfinite (sweep.getSample (0, i));
+        CHECK (finite, "output stays finite through the sweep");
+        p.setSolo (1, false);
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

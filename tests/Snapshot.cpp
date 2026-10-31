@@ -13,6 +13,7 @@ int main (int argc, char** argv)
     p.params.getParameter ("count")->setValueNotifyingHost (0.55f);
     p.params.getParameter ("encodeCount")->setValueNotifyingHost (0.5f);
     p.params.getParameter ("bitRate")->setValueNotifyingHost (0.6f);
+    p.params.getParameter ("spread")->setValueNotifyingHost (0.6f);
     juce::AudioBuffer<float> b (2, 256); juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
     for (int i = 0; i < 60; ++i) { p.processBlock (b, m); m.clear(); }
     std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
