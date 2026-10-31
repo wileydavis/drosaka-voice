@@ -170,12 +170,27 @@ inline void computeCrowd (const Bank& bank, float countVoices, float* gain, floa
 }
 
 //==============================================================================
-// Encode count: how much of each stem is on the codec (0 = dry .. 1 = codec),
-// for encodeVoices = 0 .. bank size. Voices go over one at a time, in encodeOrder.
-inline void computeEncode (const Bank& bank, float encodeVoices, float* encode)
+// Encode count over the AUDIBLE voices only (crowdGain > 0: inside the Count window,
+// not muted, or soloed). encodeFraction 0..1 maps to 0..A audible voices, taken one
+// at a time in encodeOrder (primary last). rank[] gets each voice's place among the
+// audible ones (1-based, 0 = not audible), for the UI.
+inline void computeEncode (const Bank& bank, float encodeFraction, const float* crowdGain, float* encode, int* rank = nullptr)
 {
     const int n = juce::jmin (bank.size(), maxVoices);
-    for (int i = 0; i < n; ++i) encode[i] = 0.0f;
-    for (int r = 0; r < (int) bank.encodeOrder.size() && r < n; ++r)
-        encode[bank.encodeOrder[(size_t) r]] = juce::jlimit (0.0f, 1.0f, encodeVoices - (float) r);
+    int audible = 0;
+    for (int i = 0; i < n; ++i) audible += crowdGain[i] > 0.0f ? 1 : 0;
+    const float e = juce::jlimit (0.0f, 1.0f, encodeFraction) * (float) audible;
+
+    // Silent voices wait dry, unless everything is encoded (then they arrive encoded).
+    const float idle = encodeFraction >= 0.999f ? 1.0f : 0.0f;
+    for (int i = 0; i < n; ++i) { encode[i] = idle; if (rank != nullptr) rank[i] = 0; }
+
+    int r = 0;
+    for (int idx : bank.encodeOrder)
+    {
+        if (idx >= n || crowdGain[idx] <= 0.0f) continue;
+        encode[idx] = juce::jlimit (0.0f, 1.0f, e - (float) r);
+        ++r;
+        if (rank != nullptr) rank[idx] = r;
+    }
 }

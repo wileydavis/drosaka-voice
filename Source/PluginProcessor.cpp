@@ -315,7 +315,11 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Crowd and codec targets for this block.
     float tg[maxVoices], tp[maxVoices], te[maxVoices];
     computeCrowd (b, countParam->load() * (float) n, tg, tp);
-    computeEncode (b, encodeParam->load() * (float) n, te);
+    int ranks[maxVoices];
+    computeEncode (b, encodeParam->load(), tg, te, ranks);
+    int audible = 0;
+    for (int s = 0; s < n; ++s) { voiceRank[s] = ranks[s]; audible += ranks[s] > 0 ? 1 : 0; }
+    audibleVoices = audible;
 
     const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
     for (int s = 0; s < n; ++s)

@@ -12,8 +12,8 @@
 //   - auto-sorted by pitch or formant; one primary in the centre
 //   - Count builds the crowd outward from the primary in pairs, crossfading smoothly
 //   - every voice runs through its own LPC codec; dry voices are delayed to match the
-//     codec's latency (reported to the host). Encode count moves voices onto the codec one
-//     at a time in a fixed scatter order, primary last.
+//     codec's latency (reported to the host). Encode count moves the audible voices onto
+//     the codec one at a time in a fixed scatter order, primary last.
 class DrosakaVoiceProcessor : public juce::AudioProcessor
 {
 public:
@@ -77,6 +77,13 @@ public:
         return stemIndex >= 0 && stemIndex < maxVoices ? voiceEncode[stemIndex].load() : 0.0f;
     }
 
+    // Place in the infection order among audible voices (1-based), 0 if not audible.
+    int getVoiceEncodeRank (int stemIndex) const
+    {
+        return stemIndex >= 0 && stemIndex < maxVoices ? voiceRank[stemIndex].load() : 0;
+    }
+    std::atomic<int> audibleVoices { 0 };
+
     // Bumped whenever the bank changes, so the editor rebuilds.
     std::atomic<int> bankGeneration { 0 };
 
@@ -129,6 +136,7 @@ private:
     std::atomic<float> playhead { -1.0f };
     std::atomic<float> voiceLevel[maxVoices] {};
     std::atomic<float> voiceEncode[maxVoices] {};
+    std::atomic<int> voiceRank[maxVoices] {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrosakaVoiceProcessor)
 };

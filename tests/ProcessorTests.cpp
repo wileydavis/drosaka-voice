@@ -393,17 +393,35 @@ int main()
         auto edge = fakeBank ({ 100, 200, 300, 400 }, 0);   // primary at the edge: one side only
         CHECK (edge->encodeOrder.size() == 4 && edge->encodeOrder.back() == 0, "primary last even at the array's edge");
 
-        float e[maxVoices];
-        computeEncode (*b, 0.0f, e);
+        float e[maxVoices], all[maxVoices];
+        std::fill (all, all + maxVoices, 1.0f);
+        computeEncode (*b, 0.0f / 9, all, e);
         CHECK (*std::max_element (e, e + 9) == 0.0f, "Encode 0 -> all dry");
-        computeEncode (*b, 1.0f, e);
+        computeEncode (*b, 1.0f / 9, all, e);
         CHECK (e[o[0]] == 1.0f && std::count (e, e + 9, 0.0f) == 8, "Encode 1 -> exactly one voice, at full strength");
-        computeEncode (*b, 2.5f, e);
+        computeEncode (*b, 2.5f / 9, all, e);
         CHECK (e[o[0]] == 1.0f && e[o[1]] == 1.0f && std::abs (e[o[2]] - 0.5f) < 1e-6f, "voices cross over one at a time");
-        computeEncode (*b, 8.0f, e);
+        computeEncode (*b, 8.0f / 9, all, e);
         CHECK (e[4] == 0.0f && std::count (e, e + 9, 1.0f) == 8, "Encode all-but-one -> only the primary still human");
-        computeEncode (*b, 9.0f, e);
+        computeEncode (*b, 9.0f / 9, all, e);
         CHECK (std::count (e, e + 9, 1.0f) == 9, "Encode all -> the primary falls last");
+
+        // Only audible voices count: Count window of 3 around the primary (sorted 3,4,5).
+        float g[maxVoices], pn[maxVoices]; int rk[maxVoices];
+        computeCrowd (*b, 3.0f, g, pn);
+        computeEncode (*b, 1.0f / 3.0f, g, e, rk);
+        CHECK (std::count (e, e + 9, 1.0f) == 1 && (e[3] == 1.0f || e[5] == 1.0f), "Encode 1/3 with 3 audible -> one audible voice, at full strength");
+        CHECK (e[0] + e[1] + e[2] + e[6] + e[7] + e[8] == 0.0f, "silent voices are never spent on");
+        CHECK (rk[4] == 3 && rk[0] == 0 && rk[3] + rk[5] == 3, "ranks count audible voices only, primary last");
+        computeEncode (*b, 2.0f / 3.0f, g, e);
+        CHECK (e[3] == 1.0f && e[5] == 1.0f && e[4] == 0.0f, "Encode 2/3 -> both neighbours, primary still human");
+        computeEncode (*b, 1.0f, g, e);
+        CHECK (std::count (e, e + 9, 1.0f) == 9, "Encode 100% -> everything, so voices fading in arrive encoded");
+        b->flags[3].mute = true;
+        computeCrowd (*b, 3.0f, g, pn);
+        computeEncode (*b, 0.5f, g, e);
+        CHECK (e[5] == 1.0f && e[3] == 0.0f && e[4] == 0.0f, "muted voices drop out of the count");
+        b->flags[3].mute = false;
 
         b->primary = 7; b->resort();
         CHECK (b->encodeOrder.back() == 7, "changing the primary re-plans the order with it last");

@@ -41,8 +41,6 @@ public:
         name = s.file.getFileNameWithoutExtension();
         info = formatHz (s.analysis.pitchHz) + "   " + formatHz (s.analysis.centroidHz);
         isPrimary = b.primary == idx;
-        for (size_t r = 0; r < b.encodeOrder.size(); ++r)
-            if (b.encodeOrder[r] == idx) encodeRank = (int) r + 1;
 
         for (auto* btn : { &primaryBtn, &muteBtn, &soloBtn, &removeBtn }) { addAndMakeVisible (*btn); styleToggle (*btn, colours::accent); }
         styleToggle (muteBtn, colours::dim);
@@ -85,8 +83,9 @@ public:
 
         // Codec order: which infection step takes this voice; lit once it's on the codec.
         g.setFont (juce::FontOptions (11.0f));
+        const int encodeRank = proc.getVoiceEncodeRank (idx);
         g.setColour (enc > 0.5f ? colours::codec : colours::dim.withAlpha (0.6f));
-        g.drawText (juce::String (encodeRank), r.withWidth (textW - 190).withTrimmedLeft (160), juce::Justification::centredRight);
+        g.drawText (encodeRank > 0 ? juce::String (encodeRank) : juce::String ("-"), r.withWidth (textW - 190).withTrimmedLeft (160), juce::Justification::centredRight);
         if (isPrimary) { g.setColour (colours::accent); g.fillRect (r.withWidth (3)); }
 
         g.setFont (juce::FontOptions (13.0f));
@@ -101,7 +100,6 @@ private:
     int idx;
     juce::String name, info;
     bool isPrimary = false;
-    int encodeRank = 0;
     juce::TextButton primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
 };
 
@@ -325,13 +323,13 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
             g.drawText (value, c.getRight() + 8, ca.getY() + 28, 90, 14, juce::Justification::centredLeft);
         };
         {
-            const int nVoices = shownBank != nullptr ? shownBank->size() : 0;
+            const int nVoices = proc.audibleVoices.load();
             g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
             g.setColour (colours::codec);
             g.drawText ("ENCODE", encodeKnob.getRight() + 8, ca.getY() + 12, 100, 16, juce::Justification::centredLeft);
             g.setFont (juce::FontOptions (11.0f));
             g.setColour (colours::dim);
-            g.drawText (juce::String (encodeKnob.getValue() * nVoices, 1) + " of " + juce::String (nVoices) + " voices",
+            g.drawText (juce::String (encodeKnob.getValue() * nVoices, 1) + " of " + juce::String (nVoices) + " audible",
                         encodeKnob.getRight() + 8, ca.getY() + 30, 110, 14, juce::Justification::centredLeft);
             g.setFont (juce::FontOptions (11.0f));
         }

@@ -37,7 +37,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 - **ENCODE** (automatable, 0–100% = 0 to all voices) moves voices onto the codec one at a time, each crossfading to full strength in 30 ms
 - **Order:** a fixed-seed scatter that alternates left and right of the primary, so the infection jumps around the head. The primary always goes last. The **codec order** column shows each voice's place in line and lights teal once that voice is taken
 - **Re-planning:** changing the primary or the sort re-plans the order, still with the primary last
-- **Order vs Count:** the order covers the whole bank and doesn't depend on Count, so a voice's place never shifts while you sweep Count. As a result, a step can land on a muted voice or one outside the Count window
+- **Audible voices only:** Encode counts only the voices you can hear, meaning those inside the Count window and not muted. "2.0 of 4 audible" means two of them are on the codec. Silent voices show "–" in the order column. At 100%, voices fading in arrive already encoded
 - **Level:** a fully encoded crowd sits within about 0.5 dB of the dry crowd
 - The M3 "codec on primary" switch is gone (Encode at 100% with one voice does the same)
 
