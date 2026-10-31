@@ -44,6 +44,9 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     repeatsParam = params.getRawParameterValue ("repeats");
     dropSemisParam = params.getRawParameterValue ("dropSemis");
     latchParam = params.getRawParameterValue ("latch");
+    dropParam = params.getRawParameterValue ("drop");
+    keepHumanParam = params.getRawParameterValue ("keepHuman");
+    depthParam = params.getRawParameterValue ("depth");
     motionDivParam = params.getRawParameterValue ("motionDiv");
     encodeQuantParam = params.getRawParameterValue ("encodeQuant");
     bitRateParam = params.getRawParameterValue ("bitRate");
@@ -107,6 +110,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
         juce::NormalisableRange<float> (0.0f, 12.0f), 5.0f,
         juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1) + " st"; })));
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "latch", 1 }, "Latch", false));
+
+    // The drop, the human primary, and depth.
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "drop", 1 }, "Drop (primary only, human)", false));
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keepHuman", 1 }, "Keep primary human", false));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "depth", 1 }, "Depth",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
     return layout;
 }
 
@@ -134,7 +143,15 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
         d.delayPos = 0;
         d.encode = 0.0f;
         d.drySemis = d.codecSemis = d.psolaMix = 0.0f;
+        d.depthRing.assign ((size_t) juce::nextPowerOfTwo ((int) (0.015 * sampleRate) + 4), 0.0f);
+        d.depthPos = 0;
+        d.depth = 0.0f;
     }
+    reverb.setSampleRate (sampleRate);
+    juce::Reverb::Parameters rp;
+    rp.roomSize = 0.55f; rp.damping = 0.45f; rp.wetLevel = 1.0f; rp.dryLevel = 0.0f; rp.width = 1.0f;
+    reverb.setParameters (rp);
+    reverb.reset();
 }
 
 //==============================================================================
@@ -536,6 +553,7 @@ void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double pp
             const double div = pattern::divisionBeats ((int) patternDivParam->load());
             patternState = {};
             patternState.slice = sliceKey ? k : 0;
+            lastPatternType = juce::jlimit (0, 6, (int) patternTypeParam->load());
             nextStepPpq = std::ceil (ppqAt / div - 1e-9) * div;
             patternState.startPpq = nextStepPpq;
             numPending = 0;
@@ -602,10 +620,32 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Crowd targets for this block (encode and pans are per chunk: they follow the grid).
     float tg[maxVoices], tpRadiate[maxVoices], tp[maxVoices], te[maxVoices];
     computeCrowd (b, countParam->load() * (float) n, tg, tpRadiate);
+
+    // Drop: everything but the primary fades out, and the primary is human (dry).
+    const bool dropOn = dropParam->load() > 0.5f;
+    const int prim = (b.primary >= 0 && b.primary < n) ? b.primary : -1;
+    if (dropOn)
+        for (int s = 0; s < n; ++s) { tg[s] = s == prim ? 1.0f : 0.0f; tpRadiate[s] = 0.0f; }
+    const bool keepHuman = keepHumanParam->load() > 0.5f;
+
+    // Encode counts audible voices; with "keep primary human" the primary isn't one of them.
+    float encodeGain[maxVoices];
+    for (int s = 0; s < n; ++s) encodeGain[s] = (keepHuman && s == prim) ? 0.0f : tg[s];
     int ranks[maxVoices];
     int audible = 0;
-    for (int s = 0; s < n; ++s) audible += tg[s] > 0.0f ? 1 : 0;
+    for (int s = 0; s < n; ++s) audible += encodeGain[s] > 0.0f ? 1 : 0;
     audibleVoices = audible;
+
+    // Depth: outer voices (by their place in the crowd, not their moving pan, so motion
+    // never bends pitch) sit further back: quieter, a little later, more reverb.
+    float tDepth[maxVoices];
+    {
+        int pair[maxVoices], side[maxVoices];
+        spread::layout (b, pair, side);
+        const int maxPair = juce::jmax (1, n / 2);
+        const float depth = depthParam->load();
+        for (int s = 0; s < n; ++s) tDepth[s] = dropOn ? 0.0f : depth * (float) pair[s] / (float) maxPair;
+    }
 
     // Musical clock: Live's transport when playing, otherwise an internal clock at the
     // last tempo, so motion keeps moving while stopped. Output is 'latency' late (Live
@@ -708,6 +748,13 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 pp.density = densityParam->load();
                 pp.repeats = (int) repeatsParam->load();
                 pp.drop = dropSemisParam->load();
+                // A new pattern starts its own count (Ratchet accelerates from where you switch to it).
+                if (pp.type != lastPatternType)
+                {
+                    lastPatternType = pp.type;
+                    patternState.step = 0;
+                    patternState.startPpq = nextStepPpq;
+                }
                 const double horizon = blockPpq + (chunkStart + chunkSize) / spb;
                 while (nextStepPpq < horizon && numPending < 24)
                 {
@@ -748,7 +795,8 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             encodeFraction = audible > 0 ? juce::jmin (latchedEncodeVoices, (float) audible) / (float) audible : 0.0f;
         }
         else lastEncodeStep = std::numeric_limits<juce::int64>::min();
-        computeEncode (b, encodeFraction, tg, te, ranks);
+        computeEncode (b, encodeFraction, encodeGain, te, ranks);
+        if (prim >= 0 && (keepHuman || dropOn)) te[prim] = 0.0f;
 
         // Spatial targets.
         const auto motionStep = (juce::int64) std::floor (ppqNow / motionGrid + 1e-7);
@@ -799,6 +847,9 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const float eStep = (float) (num / (encodeGlideSec * hostRate));
         const float invNum = 1.0f / (float) num;
 
+        std::fill (sendL, sendL + num, 0.0f);
+        std::fill (sendR, sendR + num, 0.0f);
+
         for (int s = 0; s < n; ++s)
         {
             auto& st = *b.stems[(size_t) s];
@@ -821,6 +872,14 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             const int mask = (int) vd.delay.size() - 1;
             const bool silent = l0 + r0 + l1 + r1 <= 0.0f;
             const float* shifted = shiftBuf.getReadPointer (s);
+
+            // Depth glides slowly (it only moves when the crowd's layout does).
+            const float d0 = vd.depth;
+            vd.depth = approach (vd.depth, tDepth[s], (float) (num / (0.2 * hostRate)));
+            const float d1 = vd.depth;
+            const int dmask = (int) vd.depthRing.size() - 1;
+            const float maxPre = (float) (0.012 * hostRate);   // up to 12 ms later
+
             for (int j = 0; j < num; ++j)
             {
                 // Dry output = direct playback, crossfaded to the pitch-shifted version when Spread moves it.
@@ -828,17 +887,44 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 vd.delay[(size_t) vd.delayPos] = wantPsola[s] ? dry[j] + m * (shifted[j] - dry[j]) : dry[j];
                 const float delayed = vd.delay[(size_t) ((vd.delayPos - latency) & mask)];
                 vd.delayPos = (vd.delayPos + 1) & mask;
-                if (silent) continue;
 
                 const float a = (float) j * invNum;
-                const float e = e0 + a * (e1 - e0);
-                // Equal-power crossfade dry <-> codec.
-                const float x = delayed * std::cos (e * juce::MathConstants<float>::halfPi)
-                              + codecOut[(size_t) j] * std::sin (e * juce::MathConstants<float>::halfPi);
+                float x = 0.0f;
+                if (! silent)
+                {
+                    const float e = e0 + a * (e1 - e0);
+                    // Equal-power crossfade dry <-> codec.
+                    x = delayed * std::cos (e * juce::MathConstants<float>::halfPi)
+                      + codecOut[(size_t) j] * std::sin (e * juce::MathConstants<float>::halfPi);
+                }
+
+                // Depth: pre-delay (fractional), level and reverb send for outer voices.
+                vd.depthRing[(size_t) vd.depthPos] = x;
+                const float d = d0 + a * (d1 - d0);
+                if (d > 0.0f)
+                {
+                    const float pre = d * maxPre;
+                    const int pi = (int) pre;
+                    const float pf = pre - (float) pi;
+                    const float x0 = vd.depthRing[(size_t) ((vd.depthPos - pi) & dmask)];
+                    const float x1 = vd.depthRing[(size_t) ((vd.depthPos - pi - 1) & dmask)];
+                    const float xd = x0 + pf * (x1 - x0);
+                    const float send = xd * d * 0.22f;
+                    sendL[j] += send * (l0 + a * (l1 - l0));
+                    sendR[j] += send * (r0 + a * (r1 - r0));
+                    x = xd * (1.0f - 0.5f * d);    // up to -6 dB dry
+                }
+                vd.depthPos = (vd.depthPos + 1) & dmask;
+                if (silent) continue;
+
                 outL[chunkStart + j] += x * (l0 + a * (l1 - l0));
                 outR[chunkStart + j] += x * (r0 + a * (r1 - r0));
             }
         }
+
+        // Shared reverb for the depth sends (silent at Depth 0, but kept running so it's warm).
+        reverb.processStereo (sendL, sendR, num);
+        for (int j = 0; j < num; ++j) { outL[chunkStart + j] += sendL[j]; outR[chunkStart + j] += sendR[j]; }
     }
 
     for (int s = 0; s < n; ++s) voiceRank[s] = ranks[s];

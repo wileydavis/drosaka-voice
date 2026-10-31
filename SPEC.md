@@ -78,15 +78,16 @@ Slice order shuffled, fires on the division with a Density knob
 • Each slice is stretched or truncated to its step length so the phrase stays on grid regardless of how it was spoken
 • Holding a slice key while a pattern runs jumps the walk to that slice on the next step
 • Pattern timing follows Live's transport so it stays locked to the groove engine clock
+  [decided Oct 30, M8] As built: Play mode Manual/Pattern. In Pattern, any key starts the walk on the next Division line (a slice key starts it from that slice); holding a slice key mid-walk jumps there on the next step; releasing every key stops it unless Latch is on. Hits land sample-exactly on Live's grid. Fitting: a slice shorter than its step is time-stretched to fill it (up to 2x, PSOLA, pitch unchanged), a longer one is truncated; Gate (5-100%) sets how much of the step sounds. Screwed fits each slice exactly to its step and drops it by Drop (0-12 st, default 5). Stutter: the slice on one step, then Repeat-count retriggers of its opening in the next, then on. Skip/Rewind: Density is the chance of a skip (silent step) or rewind (back one slice), half each; repeatable. Ratchet: division halves every bar, down to 1/16 of it, counted from when Ratchet is selected. Random: a fresh shuffle of the slices each pass; Density = chance a step fires. Division: 1/4 1/8 1/16 1/32 + triplets. Switching pattern restarts its count. Pattern changes are deterministic (same pattern plays the same way).
 Technical notes and open questions
 Build in JUCE, ship AU and VST3 from one codebase (Ableton on Mac loads both; Windows loads VST3 only). Codec core: LPC analysis around 10th order at 8 kHz, hard-quantized coefficients, resynthesis with a pulse or saw excitation; quantization and frame drop are what make it sound like radio rather than a vocoder.
 Reference sounds for the codec: LPC-10 and STANAG 4591 MELP demos (YouTube); musical cousins are Kraftwerk "Numbers" and Laurie Anderson "O Superman". Reference for chopped vocal technique: Green Velvet "Flash", Blawan "Why They Hide Their Bodies Under My Garage".
 Open questions:
 [~] Full list of spatial modes beyond radiate and bounce — Orbit and Swap proposed (M6), awaiting Wiley's ear
-[ ] Depth cues for outer voices (level, short delay, reverb) or pure panning
-[ ] Should a dry primary-voice path be available after the codec stage
-[ ] Does the primary stay dry at the drop by automation, or by a dedicated "solo primary" trigger
-[ ] Shared transport with the groove engine / sf-transport
+[x] Depth cues for outer voices — Depth knob (default 0 = pure panning): outer voices by their place in the crowd get up to -6 dB dry, +12 ms pre-delay and a shared reverb send; the primary never. Based on crowd position, not moving pan, so Bounce/Orbit never bend pitch.
+[x] Dry primary path — "Keep primary human" switch: Encode never takes the primary (100% = every voice but the real one).
+[x] The drop — a dedicated DROP switch (automatable, MIDI-mappable): the crowd fades out (50 ms) and the primary comes back human and dead centre, whatever Count/Encode/Spread are doing.
+[x] Shared transport — the device follows Live's transport (tempo, position, latency-compensated), so it's locked to anything else in the set, the groove engine included. A direct sf-transport link would only matter outside Live.
 Build order and working method
 Build in milestones ordered by what is audible soonest. One milestone per chat session: build it, Wiley tests it in Ableton Live, reports what he heard, and the next milestone does not start until the current one sounds right. Corrections to the spec happen as they are found.
 Milestone 0, toolchain: Xcode is already installed (used for the iOS Roadbook app). Add CMake and JUCE via Homebrew/git clone, then a one-line build script that compiles AU and VST3 and copies them into ~/Library/Audio/Plug-Ins/Components and /VST3 so a rescan in Live picks them up. Claude Code runs the builds from the laptop; the chat cannot produce plugin binaries itself.

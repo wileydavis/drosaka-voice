@@ -454,11 +454,50 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     setupBox (motionBox, spatial::divisionNames(), "motionDiv", motionAttachment);
     setupBox (quantBox, spatial::quantiseNames(), "encodeQuant", quantAttachment);
 
+    // Depth, the drop, the human primary.
+    auto styleKnob = [this] (juce::Slider& k, juce::Colour c)
+    {
+        k.setColour (juce::Slider::rotarySliderFillColourId, c);
+        k.setColour (juce::Slider::rotarySliderOutlineColourId, colours::row);
+        k.setColour (juce::Slider::thumbColourId, colours::wave);
+        k.onValueChange = [this] { repaint(); };
+        addAndMakeVisible (k);
+    };
+    auto styleSwitch = [this] (juce::TextButton& b2, juce::Colour on)
+    {
+        b2.setClickingTogglesState (true);
+        b2.setColour (juce::TextButton::buttonColourId, colours::row);
+        b2.setColour (juce::TextButton::buttonOnColourId, on);
+        b2.setColour (juce::TextButton::textColourOffId, colours::dim);
+        b2.setColour (juce::TextButton::textColourOnId, colours::bg);
+        addAndMakeVisible (b2);
+    };
+    styleKnob (depthKnob, colours::wave);
+    depthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "depth", depthKnob);
+    styleSwitch (dropButton, colours::accent);
+    dropButton.setTooltip ("The drop: the crowd fades out and the primary comes back human, dead centre (automatable)");
+    dropAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.params, "drop", dropButton);
+    styleSwitch (keepHumanButton, colours::accent);
+    keepHumanButton.setTooltip ("Encode never takes the primary: 100% = every voice but the real one");
+    keepHumanAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.params, "keepHuman", keepHumanButton);
+
+    // Pattern strip.
+    setupBox (playModeBox, juce::StringArray { "Manual", "Pattern" }, "playMode", playModeAttachment);
+    setupBox (patternBox, pattern::typeNames(), "patternType", patternAttachment);
+    setupBox (patternDivBox, pattern::divisionNames(), "patternDiv", patternDivAttachment);
+    for (auto* k : { &gateKnob, &densityKnob, &repeatsKnob, &dropSemisKnob }) styleKnob (*k, colours::slice);
+    gateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "gate", gateKnob);
+    densityAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "density", densityKnob);
+    repeatsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "repeats", repeatsKnob);
+    dropSemisAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "dropSemis", dropSemisKnob);
+    styleSwitch (latchButton, colours::slice);
+    latchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.params, "latch", latchButton);
+
     listView.setViewedComponent (&listContent, false);
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (860, 796);
+    setSize (860, 872);
     startTimerHz (30);
 }
 
@@ -536,6 +575,7 @@ void DrosakaVoiceEditor::timerCallback()
     for (auto& r : rows) r->repaint();
     repaint (fieldArea());
     repaint (spaceArea().withTrimmedRight (240));
+    repaint (patternArea());
 }
 
 void DrosakaVoiceEditor::updateTimeline()
@@ -577,6 +617,11 @@ juce::Rectangle<int> DrosakaVoiceEditor::spaceArea() const
     return spreadArea().translated (0, 76);
 }
 
+juce::Rectangle<int> DrosakaVoiceEditor::patternArea() const
+{
+    return spaceArea().translated (0, 76);
+}
+
 juce::Rectangle<int> DrosakaVoiceEditor::fieldArea() const
 {
     auto a = spaceArea().reduced (10, 8);
@@ -609,9 +654,22 @@ void DrosakaVoiceEditor::resized()
     auto xa = spaceArea();
     spatialBox.setBounds (xa.getX() + 10, xa.getY() + 28, 120, 26);
     motionBox.setBounds (xa.getX() + 140, xa.getY() + 28, 90, 26);
-    quantBox.setBounds (xa.getX() + 270, xa.getY() + 28, 90, 26);
+    quantBox.setBounds (xa.getX() + 250, xa.getY() + 28, 90, 26);
+    depthKnob.setBounds (xa.getX() + 360, xa.getY() + 10, 46, 46);
+    dropButton.setBounds (xa.getX() + 488, xa.getY() + 20, 90, 30);
 
-    listView.setBounds (16, xa.getBottom() + 34, getWidth() - 32, getHeight() - xa.getBottom() - 34 - 30);
+    auto ca2 = codecArea();
+    keepHumanButton.setBounds (ca2.getRight() - 186, ca2.getY() + 28, 176, 28);
+
+    auto pa = patternArea();
+    playModeBox.setBounds (pa.getX() + 10, pa.getY() + 28, 100, 26);
+    patternBox.setBounds (pa.getX() + 120, pa.getY() + 28, 130, 26);
+    patternDivBox.setBounds (pa.getX() + 260, pa.getY() + 28, 80, 26);
+    int kx = pa.getX() + 356;
+    for (auto* k : { &gateKnob, &densityKnob, &repeatsKnob, &dropSemisKnob }) { k->setBounds (kx, pa.getY() + 22, 38, 38); kx += 100; }
+    latchButton.setBounds (pa.getRight() - 80, pa.getY() + 28, 70, 26);
+
+    listView.setBounds (16, pa.getBottom() + 34, getWidth() - 32, getHeight() - pa.getBottom() - 34 - 30);
     const int rowH = 34;
     listContent.setSize (listView.getMaximumVisibleWidth(), juce::jmax (1, (int) rows.size() * rowH));
     for (size_t i = 0; i < rows.size(); ++i)
@@ -695,6 +753,37 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawText ("dry voices +-7 st, codec plays the rest", sa.getRight() - 250, sa.getY() + 6, 240, 14, juce::Justification::centredRight);
     }
 
+    // Pattern strip.
+    {
+        auto pa = patternArea();
+        const bool on = playModeBox.getSelectedItemIndex() == 1;
+        g.setColour (colours::panel);
+        g.fillRoundedRectangle (pa.toFloat(), 6.0f);
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (colours::wave);
+        g.drawText ("PLAY", playModeBox.getX(), pa.getY() + 8, 100, 14, juce::Justification::centredLeft);
+        g.drawText ("PATTERN", patternBox.getX(), pa.getY() + 8, 100, 14, juce::Justification::centredLeft);
+        g.drawText ("DIVISION", patternDivBox.getX(), pa.getY() + 8, 80, 14, juce::Justification::centredLeft);
+        auto knobLabel = [&] (juce::Slider& k, const juce::String& name, const juce::String& value, bool used)
+        {
+            g.setColour (used ? colours::wave : colours::dim);
+            g.drawText (name, k.getRight() + 5, pa.getY() + 20, 60, 14, juce::Justification::centredLeft);
+            g.setColour (colours::dim);
+            g.drawText (value, k.getRight() + 5, pa.getY() + 36, 60, 14, juce::Justification::centredLeft);
+        };
+        const int type = patternBox.getSelectedItemIndex();
+        knobLabel (gateKnob, "GATE", juce::String (juce::roundToInt (gateKnob.getValue() * 100)) + "%", true);
+        knobLabel (densityKnob, "DENSITY", juce::String (juce::roundToInt (densityKnob.getValue() * 100)) + "%", type == pattern::random || type == pattern::skipRewind);
+        knobLabel (repeatsKnob, "REPEATS", juce::String ((int) repeatsKnob.getValue()) + "x", type == pattern::repeat || type == pattern::stutter);
+        knobLabel (dropSemisKnob, "DROP", "-" + juce::String (dropSemisKnob.getValue(), 1) + " st", type == pattern::screwed);
+        g.setColour (proc.patternActive.load() ? colours::slice : colours::dim);
+        const int sl = proc.patternSlice.load();
+        g.drawText (! on ? "keys play slices directly"
+                         : proc.patternActive.load() ? "walking: " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + juce::jmax (0, sl), true, true, 3)
+                                                     : "a key starts the walk on the next " + patternDivBox.getText(),
+                    pa.getRight() - 300, pa.getY() + 8, 290, 14, juce::Justification::centredRight);
+    }
+
     // Space & time strip, with a live view of the stereo field.
     {
         auto xa = spaceArea();
@@ -705,9 +794,11 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawText ("SPACE", spatialBox.getX(), xa.getY() + 8, 120, 14, juce::Justification::centredLeft);
         g.drawText ("RATE", motionBox.getX(), xa.getY() + 8, 90, 14, juce::Justification::centredLeft);
         g.drawText ("ENCODE STEPS", quantBox.getX(), xa.getY() + 8, 100, 14, juce::Justification::centredLeft);
+        g.drawText ("DEPTH", depthKnob.getRight() + 6, xa.getY() + 18, 70, 14, juce::Justification::centredLeft);
         g.setColour (colours::dim);
-        g.drawText (juce::String (proc.hostBpm.load(), 1) + " bpm  " + (proc.hostPlaying.load() ? "Live" : "internal clock"),
-                    quantBox.getRight() + 16, xa.getY() + 34, 160, 14, juce::Justification::centredLeft);
+        g.drawText (depthKnob.getValue() < 0.01 ? "pure pan" : juce::String (juce::roundToInt (depthKnob.getValue() * 100)) + "%",
+                    depthKnob.getRight() + 6, xa.getY() + 34, 70, 14, juce::Justification::centredLeft);
+
 
         auto f = fieldArea();
         g.setColour (colours::bg);
@@ -716,6 +807,10 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawVerticalLine (f.getCentreX(), (float) f.getY() + 2, (float) f.getBottom() - 2);
         g.setColour (colours::dim);
         g.drawText ("L", f.reduced (4, 0), juce::Justification::centredLeft);
+        g.setFont (juce::FontOptions (10.0f));
+        g.drawText (juce::String (proc.hostBpm.load(), 1) + " bpm  " + (proc.hostPlaying.load() ? "Live" : "internal clock"),
+                    f.reduced (6, 2), juce::Justification::bottomLeft);
+        g.setFont (juce::FontOptions (11.0f));
         g.drawText ("R", f.reduced (4, 0), juce::Justification::centredRight);
         if (shownBank != nullptr)
         {

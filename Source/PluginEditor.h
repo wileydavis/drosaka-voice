@@ -67,6 +67,22 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> spatialAttachment, motionAttachment, quantAttachment;
     juce::Rectangle<int> spaceArea() const;
     juce::Rectangle<int> fieldArea() const;
+    juce::Slider depthKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::TextButton dropButton { "DROP" }, keepHumanButton { "KEEP PRIMARY HUMAN" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> depthAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> dropAttachment, keepHumanAttachment;
+
+    // Pattern strip.
+    juce::ComboBox playModeBox, patternBox, patternDivBox;
+    juce::Slider gateKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider densityKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider repeatsKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider dropSemisKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::TextButton latchButton { "LATCH" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment, patternAttachment, patternDivAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gateAttachment, densityAttachment, repeatsAttachment, dropSemisAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> latchAttachment;
+    juce::Rectangle<int> patternArea() const;
     juce::Viewport listView;
     juce::Component listContent;
     std::vector<std::unique_ptr<VoiceRow>> rows;

@@ -152,12 +152,75 @@ static int renderSpace (int argc, char** argv)
     return 0;
 }
 
+// Pattern tour at 120 bpm: DrosakaVoiceRender --pattern <out.wav> <primary> <stems...>
+// Slices are placed at the phrase's word gaps, then two bars each of: Walk 1/8, Repeat 1/16,
+// Stutter 1/8, Screwed 1/4, Skip/Rewind 1/8, Ratchet (4 bars from 1/4), Random 1/16.
+static int renderPattern (int argc, char** argv)
+{
+    const double rate = 48000.0, spb = rate / 2.0;
+    DrosakaVoiceProcessor p;
+    p.prepareToPlay (rate, 512);
+    RenderPlayHead ph; p.setPlayHead (&ph);
+    juce::StringArray paths, errs;
+    for (int i = 3; i < argc; ++i) paths.add (juce::File (argv[i]).getFullPathName());
+    p.addStems (paths, errs);
+    auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+    set ("count", 1.0f); set ("spread", 0.15f); set ("playMode", 1.0f); set ("gate", 0.85f);
+
+    // Word gaps: quiet stretches (>= 25 ms) in the primary.
+    {
+        auto b = p.getBank();
+        const auto& st = *b->stems[(size_t) b->primary];
+        const int win = (int) (0.005 * st.sampleRate);
+        float peak = st.audio.getMagnitude (0, 0, st.audio.getNumSamples());
+        int quiet = 0; bool inGap = false; int count = 0;
+        for (int i = 0; i + win < st.audio.getNumSamples(); i += win)
+        {
+            const bool q = st.audio.getRMSLevel (0, i, win) < peak * 0.03f;
+            quiet = q ? quiet + 1 : 0;
+            if (quiet >= 5) inGap = true;
+            if (! q && inGap) { if (i > win * 20) { p.addSlice (i / st.sampleRate - 0.01); ++count; } inGap = false; }
+        }
+        std::printf ("%d slices at word gaps\n", count);
+    }
+
+    struct Section { int type, div, bars; float density; int repeats; };
+    const Section sections[] = { { 0, 1, 2, 1, 3 }, { 1, 2, 2, 1, 2 }, { 2, 1, 2, 1, 4 }, { 3, 0, 2, 1, 3 },
+                                 { 4, 1, 2, 0.6f, 3 }, { 5, 0, 4, 1, 3 }, { 6, 2, 2, 0.8f, 3 } };
+    int totalBars = 0; for (auto& sec : sections) totalBars += sec.bars;
+    const int total = (int) (spb * 4 * totalBars) + p.getLatencySamples();
+    juce::AudioBuffer<float> out (2, total), block (2, 512);
+    for (int pos = 0; pos < total; pos += 512)
+    {
+        const double bar = (pos / spb) / 4.0;
+        int acc = 0; const Section* cur = &sections[0];
+        for (auto& sec : sections) { if (bar >= acc) cur = &sec; acc += sec.bars; }
+        set ("patternType", (float) cur->type); set ("patternDiv", (float) cur->div);
+        set ("density", cur->density); set ("repeats", (float) cur->repeats);
+        juce::MidiBuffer midi;
+        if (pos == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 48, (juce::uint8) 100), 0);
+        p.processBlock (block, midi);
+        ph.ppq += 512.0 / spb;
+        const int m = juce::jmin (512, total - pos);
+        for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, pos, block, ch, 0, m);
+    }
+    const juce::File f (argv[2]);
+    f.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), rate, 2, 24, {}, 0));
+    w->writeFromAudioSampleBuffer (out, p.getLatencySamples(), total - p.getLatencySamples());
+    std::printf ("wrote %s, peak %.2f\n", f.getFullPathName().toRawUTF8(), out.getMagnitude (0, total));
+    p.setPlayHead (nullptr);
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
     if (argc >= 4 && juce::String (argv[1]) == "--build") return renderBuild (argc, argv);
     if (argc >= 4 && juce::String (argv[1]) == "--spread") return renderSpread (argc, argv);
     if (argc >= 4 && juce::String (argv[1]) == "--space") return renderSpace (argc, argv);
+    if (argc >= 4 && juce::String (argv[1]) == "--pattern") return renderPattern (argc, argv);
     if (argc >= 4 && juce::String (argv[1]) == "--align")
     {
         // --align ref.wav other.wav ... : print the offset each would get against ref

@@ -1115,6 +1115,72 @@ int main()
         (void) jumpRun; (void) latched;
     }
 
+
+    std::printf ("drop, human primary, depth\n");
+    {
+        juce::StringArray paths;
+        const float f0s[] = { 110, 130, 150, 175, 200 };
+        for (int i = 0; i < 5; ++i)
+            paths.add (writeWav ("dr" + juce::String (i) + ".wav", voiceTone (f0s[i], 0.3f, rate, (int) rate * 3), rate).getFullPathName());
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems (paths, errs);
+        p.setPrimary (2);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        set ("count", 1.0f); set ("encodeCount", 1.0f); set ("spread", 2.0f / 3.0f);
+
+        // Keep primary human: Encode 100% takes every voice except the primary.
+        set ("keepHuman", 1.0f);
+        run (p, 256, 40, { 0 });
+        int enc = 0; for (int s2 = 0; s2 < 5; ++s2) enc += p.getVoiceEncode (s2) > 0.5f ? 1 : 0;
+        CHECK (enc == 4 && p.getVoiceEncode (2) < 0.01f && p.audibleVoices.load() == 4, "Keep primary human: Encode 100% stops short of the primary");
+        set ("keepHuman", 0.0f);
+        run (p, 256, 40, {});
+        CHECK (p.getVoiceEncode (2) > 0.99f, "without it, the primary falls last as before");
+
+        // Drop: mid-phrase, the crowd fades out and the primary comes back human, dead centre.
+        run (p, 256, 700, {});
+        auto natural = run (p, 256, 300, { 0 });
+        run (p, 256, 700, {});
+        auto dropped = run (p, 256, 300, { 0 }, [&] (int blk) { if (blk == 100) set ("drop", 1.0f); });
+        bool onlyPrimary = true;
+        for (int s2 = 0; s2 < 5; ++s2) onlyPrimary &= s2 == 2 ? p.getVoiceLevel (s2) > 0.99f : p.getVoiceLevel (s2) < 0.01f;
+        CHECK (onlyPrimary && p.getVoiceEncode (2) < 0.01f, "Drop: only the primary, and it's human");
+        float lr = 0; for (int i = 256 * 200; i < 256 * 300; ++i) lr = juce::jmax (lr, std::abs (dropped.getSample (0, i) - dropped.getSample (1, i)));
+        CHECK (lr < 1e-4f, "Drop: the primary sits dead centre");
+        CHECK (maxJump (dropped) < maxJump (natural) * 1.3f, "Drop cuts in without a click");
+        set ("drop", 0.0f);
+        run (p, 256, 60, {});
+        int back = 0; for (int s2 = 0; s2 < 5; ++s2) back += p.getVoiceLevel (s2) > 0.01f ? 1 : 0;
+        CHECK (back == 5, "releasing Drop brings the crowd back");
+
+        // Depth: the outermost voice gets quieter, later and wetter; the primary is untouched.
+        set ("encodeCount", 0.0f); set ("spread", 0.0f);
+        auto soloRun = [&] (int voice, float depth)
+        {
+            set ("depth", depth);
+            p.setSolo (voice, true);
+            run (p, 256, 800, {});
+            auto o = run (p, 256, 900, { 0 });
+            p.setSolo (voice, false);
+            return o;
+        };
+        auto onset = [] (const juce::AudioBuffer<float>& o) { for (int i = 0; i < o.getNumSamples(); ++i) if (std::abs (o.getSample (0, i)) + std::abs (o.getSample (1, i)) > 0.01f) return i; return -1; };
+        auto rms = [] (const juce::AudioBuffer<float>& o, int a, int n2) { return o.getRMSLevel (0, a, n2) + o.getRMSLevel (1, a, n2); };
+        // In the solo crowd layout the pair index is fixed by the bank, so voice 0 (lowest) is outermost.
+        auto outer0 = soloRun (0, 0.0f), outer1 = soloRun (0, 1.0f);
+        auto prim0 = soloRun (2, 0.0f), prim1 = soloRun (2, 1.0f);
+        const int delayMs = juce::roundToInt ((onset (outer1) - onset (outer0)) / 48.0);
+        const double levelDb = 20 * std::log10 (rms (outer1, 40000, 48000) / rms (outer0, 40000, 48000));
+        const int end = onset (outer0) + (int) (rate * 3) + 2000;
+        std::printf ("       outer voice at Depth 100%%: +%d ms later, %+.1f dB, tail after the phrase %.4f\n", delayMs, levelDb, rms (outer1, end, 9600));
+        CHECK (delayMs >= 10 && delayMs <= 13, "Depth: the outer voice arrives ~12 ms later");
+        CHECK (levelDb < -1.0 && levelDb > -6.0, "Depth: and a few dB quieter (with its reverb)");
+        CHECK (rms (outer1, end, 9600) > 0.002f && rms (outer0, end, 9600) < 1e-4f, "Depth: and leaves a reverb tail");
+        float diff = 0; for (int i = 0; i < prim0.getNumSamples(); ++i) diff = juce::jmax (diff, std::abs (prim0.getSample (0, i) - prim1.getSample (0, i)));
+        CHECK (diff < 1e-5f, "Depth never touches the primary");
+        set ("depth", 0.0f);
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

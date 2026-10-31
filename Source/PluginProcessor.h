@@ -132,6 +132,9 @@ private:
         float encode = 0.0f;        // smoothed 0 = dry .. 1 = codec
         float drySemis = 0.0f, codecSemis = 0.0f;   // smoothed Spread intervals
         float psolaMix = 0.0f;      // 0 = direct playback .. 1 = pitch-shifted (PSOLA)
+        std::vector<float> depthRing;   // depth pre-delay
+        int depthPos = 0;
+        float depth = 0.0f;         // smoothed depth amount for this voice
     };
 
     struct Grain { double synthCenter, srcCenter, half; float gain; };
@@ -202,7 +205,13 @@ private:
     std::atomic<float>* repeatsParam = nullptr;
     std::atomic<float>* dropSemisParam = nullptr;
     std::atomic<float>* latchParam = nullptr;
+    std::atomic<float>* dropParam = nullptr;
+    std::atomic<float>* keepHumanParam = nullptr;
+    std::atomic<float>* depthParam = nullptr;
+    juce::Reverb reverb;
+    float sendL[chunkSize] {}, sendR[chunkSize] {};
     bool patternRunning = false;
+    int lastPatternType = -1;
     pattern::State patternState;
     double nextStepPpq = 0.0;
     PendingHit pending[32];

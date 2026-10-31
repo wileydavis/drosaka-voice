@@ -31,6 +31,38 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 5 Spread (+ stem alignment) | ✅ done — tested in Live, sounds great |
 | 6 Spatial modes + tempo sync | ✅ done — tested in Live, sounds good |
 | 7 Slicing + presets w/ embedded audio | ✅ done — tested in Live, worked perfectly |
+| 8 Pattern mode + open questions (Drop, Keep primary human, Depth) | Written and passing offline tests. **Awaiting ear test in Live** |
+
+### Milestone 8 behaviour (as built)
+
+**Pattern mode** (PLAY → Pattern). One key starts a tempo-locked walk through the slices on the next grid line:
+- **Walk** plays one slice per step, in order
+- **Repeat** plays each slice Repeat-count times before moving on
+- **Stutter** plays the slice on one step, then Repeat-count shorter retriggers of its opening on the next, then moves on
+- **Screwed** pitches each slice down by Drop (default −5 st) and stretches it to fill the step
+- **Skip / Rewind:** Density is the chance a step goes silent or steps back a slice. It's repeatable: the same pattern every time
+- **Ratchet** halves the division every bar, from when you select it, accelerating into a drop
+- **Random** shuffles the slices freshly on each pass; Density is the chance each step fires
+- **Fitting:** a slice shorter than its step is stretched to fill it (up to 2×, pitch unchanged); a longer one is truncated. **Gate** sets how much of each step sounds
+- **Keys:** a slice key starts the walk from that slice, and holding one mid-walk jumps there on the next step. Releasing every key stops the walk, unless **LATCH** is on
+- **Timing:** hits land exactly on Live's grid
+
+**DROP** (Space strip, automatable and MIDI-mappable) is the drop: the crowd fades out and the primary comes back human, dead centre, whatever else is set.
+
+**KEEP PRIMARY HUMAN** (Encode strip): Encode never takes the primary, so 100% means every voice but the real one.
+
+**DEPTH** (Space strip, default 0 = pure panning) sends the outer voices back: up to −6 dB, 12 ms later, and into a shared reverb. The primary is never affected. Depth follows each voice's place in the crowd, not its moving pan, so Bounce and Orbit never bend pitch.
+
+Pattern tour without Live: `DrosakaVoiceRender --pattern out.wav primary.wav others...` slices at word gaps, then plays two bars of each pattern (four of Ratchet).
+
+### Milestone 8 test in Live
+
+1. Slice a phrase into words, switch PLAY to Pattern, and hold a key: Walk on 1/8 should put the loose phrase on the grid
+2. Try each pattern. Does Stutter give you "they they they stole"? Does Screwed sound chopped-and-screwed?
+3. Hold a slice key while it walks: it should jump. Try LATCH
+4. Automate **DROP** at the drop: the crowd vanishes, and the human voice is left in the centre
+5. **KEEP PRIMARY HUMAN** with Encode at 100%: every voice but the real one should be on the codec
+6. **DEPTH** up on a wide crowd: the outer voices should sit further back without smearing
 
 ### Milestone 7 behaviour (as built)
 
