@@ -26,11 +26,30 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 0 Toolchain | ✅ done — builds on Mac, AU + VST3 load in Live |
 | 1 Sample player | ✅ done — tested in Live (AU + VST3), no issues |
 | 2 Voice bank | ✅ done — tested in Live, works |
-| 3 Codec, single voice | Written and passing offline tests. **Awaiting ear test in Live** |
-| 4 Encode count | not started |
+| 3 Codec, single voice | ✅ done — tested in Live, sounds good |
+| 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
 | 5 Spread | not started |
 | 6 Spatial modes + tempo sync | not started |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Milestone 4 behaviour (as built)
+
+- **ENCODE** (automatable, 0–100% = 0 to all voices) moves voices onto the codec one at a time, each crossfading to full strength in 30 ms
+- **Order:** a fixed-seed scatter that alternates left and right of the primary, so the infection jumps around the head. The primary always goes last. The **codec order** column shows each voice's place in line and lights teal once that voice is taken
+- **Re-planning:** changing the primary or the sort re-plans the order, still with the primary last
+- **Order vs Count:** the order covers the whole bank and doesn't depend on Count, so a voice's place never shifts while you sweep Count. As a result, a step can land on a muted voice or one outside the Count window
+- **Level:** a fully encoded crowd sits within about 0.5 dB of the dry crowd
+- The M3 "codec on primary" switch is gone (Encode at 100% with one voice does the same)
+
+Gesture render without Live: `DrosakaVoiceRender --build out.wav primary.wav others...` renders six loops: the crowd builds, the codec infects it over four loops, then the drop to the single human voice.
+
+### Milestone 4 test in Live
+
+1. Load a bank and turn Count up to all. Automate **ENCODE** from 0 to 100% over 8–16 bars: voices should flip one at a time, scattered left and right, with the primary last
+2. At about 95% Encode, only the primary should still sound human, dead centre
+3. Automate Count and Encode together, as in the spec's typical build
+4. Pull Encode and Count down at a "drop": it should cut back cleanly to the single human voice
+5. Judgement call: does the scatter feel like it jumps around your head, or does it need more spread?
 
 ### Milestone 3 behaviour (as built)
 

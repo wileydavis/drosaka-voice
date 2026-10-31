@@ -39,6 +39,7 @@ struct Bank : public juce::ReferenceCountedObject
     int primary = -1;                 // index into stems
     SortAxis axis = SortAxis::pitch;
     std::vector<int> sorted;          // stem indices, low -> high on 'axis'
+    std::vector<int> encodeOrder;     // stem indices in the order the codec takes them; primary last
 
     int size() const { return (int) stems.size(); }
 
@@ -55,12 +56,49 @@ struct Bank : public juce::ReferenceCountedObject
         std::stable_sort (sorted.begin(), sorted.end(), [&] (int a, int b) { return key (a) < key (b); });
         if (primary < 0 && ! stems.empty()) primary = 0;
         if (primary >= size()) primary = size() - 1;
+        computeEncodeOrder();
+    }
+
+    // Fixed-seed scatter: alternate left/right of the primary (in the sorted array,
+    // which is also how the crowd is panned), random within each side, so the codec
+    // jumps around the head. The primary always falls last.
+    void computeEncodeOrder()
+    {
+        encodeOrder.clear();
+        const int n = size();
+        if (n == 0) return;
+        int p = 0;
+        for (int s = 0; s < n; ++s) if (sorted[(size_t) s] == primary) { p = s; break; }
+
+        std::vector<int> left, right;
+        for (int s = 0; s < n; ++s)
+            if (s < p) left.push_back (sorted[(size_t) s]);
+            else if (s > p) right.push_back (sorted[(size_t) s]);
+
+        juce::Random rng (0x0D705A4A);   // fixed: the same bank always infects in the same order
+        auto shuffle = [&] (std::vector<int>& v)
+        {
+            for (int i = (int) v.size() - 1; i > 0; --i) std::swap (v[(size_t) i], v[(size_t) rng.nextInt (i + 1)]);
+        };
+        shuffle (left);
+        shuffle (right);
+
+        bool fromLeft = rng.nextBool();
+        size_t li = 0, ri = 0;
+        while (li < left.size() || ri < right.size())
+        {
+            if ((fromLeft && li < left.size()) || ri >= right.size()) encodeOrder.push_back (left[li++]);
+            else encodeOrder.push_back (right[ri++]);
+            fromLeft = ! fromLeft;
+        }
+        encodeOrder.push_back (primary);
     }
 
     Ptr clone() const
     {
         Ptr b = new Bank();
         b->stems = stems; b->flags = flags; b->primary = primary; b->axis = axis; b->sorted = sorted;
+        b->encodeOrder = encodeOrder;
         return b;
     }
 };
@@ -129,4 +167,15 @@ inline void computeCrowd (const Bank& bank, float countVoices, float* gain, floa
     for (int i = 0; i < n; ++i) power += gain[i] * gain[i];
     const float norm = 1.0f / std::sqrt (juce::jmax (1.0f, power));
     for (int i = 0; i < n; ++i) gain[i] *= norm;
+}
+
+//==============================================================================
+// Encode count: how much of each stem is on the codec (0 = dry .. 1 = codec),
+// for encodeVoices = 0 .. bank size. Voices go over one at a time, in encodeOrder.
+inline void computeEncode (const Bank& bank, float encodeVoices, float* encode)
+{
+    const int n = juce::jmin (bank.size(), maxVoices);
+    for (int i = 0; i < n; ++i) encode[i] = 0.0f;
+    for (int r = 0; r < (int) bank.encodeOrder.size() && r < n; ++r)
+        encode[bank.encodeOrder[(size_t) r]] = juce::jlimit (0.0f, 1.0f, encodeVoices - (float) r);
 }

@@ -30,7 +30,7 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
 {
     formatManager.registerBasicFormats();
     countParam = params.getRawParameterValue ("count");
-    codecParam = params.getRawParameterValue ("codecTest");
+    encodeParam = params.getRawParameterValue ("encodeCount");
     bitRateParam = params.getRawParameterValue ("bitRate");
     frameDropParam = params.getRawParameterValue ("frameDrop");
     pitchLockParam = params.getRawParameterValue ("pitchLock");
@@ -46,10 +46,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
         juce::AudioParameterFloatAttributes().withStringFromValueFunction (
             [] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; })));
 
-    // Codec (M3). The test switch is temporary: Encode count replaces it in M4.
+    // Codec.
     auto pct = juce::AudioParameterFloatAttributes().withStringFromValueFunction (
         [] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; });
-    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "codecTest", 1 }, "Codec on primary (M3 test)", false));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "encodeCount", 1 }, "Encode count",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "bitRate", 1 }, "Codec bit rate",
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.35f, pct));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "frameDrop", 1 }, "Codec frame drop",
@@ -189,6 +190,7 @@ void DrosakaVoiceProcessor::setPrimary (int idx)
     auto b = getBank()->clone();
     if (idx < 0 || idx >= b->size()) return;
     b->primary = idx;
+    b->resort();   // also recomputes the encode order (primary last)
     swapBank (b);
 }
 
@@ -313,8 +315,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Crowd and codec targets for this block.
     float tg[maxVoices], tp[maxVoices], te[maxVoices];
     computeCrowd (b, countParam->load() * (float) n, tg, tp);
-    const bool codecOn = codecParam->load() > 0.5f;
-    for (int s = 0; s < n; ++s) te[s] = (codecOn && s == b.primary) ? 1.0f : 0.0f;
+    computeEncode (b, encodeParam->load() * (float) n, te);
 
     const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
     for (int s = 0; s < n; ++s)
@@ -390,8 +391,8 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
-    for (int s = 0; s < n; ++s) voiceLevel[s] = b.stems[(size_t) s]->curGain;
-    for (int s = n; s < maxVoices; ++s) voiceLevel[s] = 0.0f;
+    for (int s = 0; s < n; ++s) { voiceLevel[s] = b.stems[(size_t) s]->curGain; voiceEncode[s] = voiceDsp[s].encode; }
+    for (int s = n; s < maxVoices; ++s) { voiceLevel[s] = 0.0f; voiceEncode[s] = 0.0f; }
 
     const auto& in = instances[current];
     const int prim = juce::jlimit (0, n - 1, b.primary);

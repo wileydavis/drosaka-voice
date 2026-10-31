@@ -12,7 +12,8 @@
 //   - auto-sorted by pitch or formant; one primary in the centre
 //   - Count builds the crowd outward from the primary in pairs, crossfading smoothly
 //   - every voice runs through its own LPC codec; dry voices are delayed to match the
-//     codec's latency (reported to the host). M3: a test switch puts the primary on the codec.
+//     codec's latency (reported to the host). Encode count moves voices onto the codec one
+//     at a time in a fixed scatter order, primary last.
 class DrosakaVoiceProcessor : public juce::AudioProcessor
 {
 public:
@@ -70,6 +71,12 @@ public:
         return stemIndex >= 0 && stemIndex < maxVoices ? voiceLevel[stemIndex].load() : 0.0f;
     }
 
+    // Current (smoothed) dry->codec amount per stem index, for the UI.
+    float getVoiceEncode (int stemIndex) const
+    {
+        return stemIndex >= 0 && stemIndex < maxVoices ? voiceEncode[stemIndex].load() : 0.0f;
+    }
+
     // Bumped whenever the bank changes, so the editor rebuilds.
     std::atomic<int> bankGeneration { 0 };
 
@@ -105,7 +112,7 @@ private:
     juce::StringArray missingPaths;
 
     std::atomic<float>* countParam = nullptr;
-    std::atomic<float>* codecParam = nullptr;
+    std::atomic<float>* encodeParam = nullptr;
     std::atomic<float>* bitRateParam = nullptr;
     std::atomic<float>* frameDropParam = nullptr;
     std::atomic<float>* pitchLockParam = nullptr;
@@ -121,6 +128,7 @@ private:
     int fadeSamples = 64;
     std::atomic<float> playhead { -1.0f };
     std::atomic<float> voiceLevel[maxVoices] {};
+    std::atomic<float> voiceEncode[maxVoices] {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrosakaVoiceProcessor)
 };

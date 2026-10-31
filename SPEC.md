@@ -24,6 +24,8 @@ Spatial mode
 How chosen voices arrange in the stereo field: radiate from center, bounce around, others TBD; tempo-synced where motion is involved
 Encode count
 Spreads the codec across the voices, 0 to all, one voice at a time at full strength; order is a fixed-seed random scatter across the field so it jumps around the head; the primary voice is always last
+  [decided Oct 30, M4] Order alternates left/right of the primary (by sorted-array side, which is also the panning side), random within each side from a fixed seed; primary last. The order is over the whole bank, independent of Count, so a voice's place in line never changes as Count moves. Consequence: steps can land on voices that aren't currently sounding. Open: should Encode count only the voices Count has made audible?
+  [decided Oct 30, M4] Codec output is DC-blocked at 50 Hz (impulse-train DC was summing coherently across encoded voices, +3 dB) with a fixed +1.6 dB make-up, so a fully encoded crowd sits within ~0.5 dB of the dry crowd. The M3 test switch is gone.
 Codec: bit rate
 Quantization severity of the LPC coefficients, clean to barely intelligible
 Codec: frame drop

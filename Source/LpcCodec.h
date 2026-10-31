@@ -48,6 +48,7 @@ private:
 
     double hostRate = 48000.0;
     juce::IIRFilter downLp[3];
+    juce::IIRFilter outHp;   // DC blocker (see prepare)
     double downPos = 0.0;    // next 8 kHz sample position, relative to current host sample
     float downPrev = 0.0f;
 

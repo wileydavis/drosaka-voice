@@ -9,6 +9,7 @@ namespace colours
     const juce::Colour accent { 0xffff5a1f };
     const juce::Colour level  { 0x55ff5a1f };
     const juce::Colour dim    { 0xff6b6f78 };
+    const juce::Colour codec  { 0xff3fc8d0 };   // voices on the codec
 }
 
 namespace
@@ -40,6 +41,8 @@ public:
         name = s.file.getFileNameWithoutExtension();
         info = formatHz (s.analysis.pitchHz) + "   " + formatHz (s.analysis.centroidHz);
         isPrimary = b.primary == idx;
+        for (size_t r = 0; r < b.encodeOrder.size(); ++r)
+            if (b.encodeOrder[r] == idx) encodeRank = (int) r + 1;
 
         for (auto* btn : { &primaryBtn, &muteBtn, &soloBtn, &removeBtn }) { addAndMakeVisible (*btn); styleToggle (*btn, colours::accent); }
         styleToggle (muteBtn, colours::dim);
@@ -75,9 +78,15 @@ public:
         g.fillRect (r);
 
         const float lvl = proc.getVoiceLevel (idx);
+        const float enc = proc.getVoiceEncode (idx);
         const int textW = r.getWidth() - 4 * 26 - 8;
-        g.setColour (colours::level);
+        g.setColour (colours::level.interpolatedWith (colours::codec.withAlpha (0.45f), enc));
         g.fillRect (r.withWidth (juce::roundToInt (lvl * (float) textW)));
+
+        // Codec order: which infection step takes this voice; lit once it's on the codec.
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (enc > 0.5f ? colours::codec : colours::dim.withAlpha (0.6f));
+        g.drawText (juce::String (encodeRank), r.withWidth (textW - 190).withTrimmedLeft (160), juce::Justification::centredRight);
         if (isPrimary) { g.setColour (colours::accent); g.fillRect (r.withWidth (3)); }
 
         g.setFont (juce::FontOptions (13.0f));
@@ -92,6 +101,7 @@ private:
     int idx;
     juce::String name, info;
     bool isPrimary = false;
+    int encodeRank = 0;
     juce::TextButton primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
 };
 
@@ -126,16 +136,7 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     countKnob.onValueChange = [this] { repaint(); };
 
     // Codec strip.
-    codecButton.setClickingTogglesState (true);
-    codecButton.setColour (juce::TextButton::buttonColourId, colours::row);
-    codecButton.setColour (juce::TextButton::buttonOnColourId, colours::accent);
-    codecButton.setColour (juce::TextButton::textColourOffId, colours::dim);
-    codecButton.setColour (juce::TextButton::textColourOnId, colours::bg);
-    codecButton.setTooltip ("Milestone 3 test: run the primary voice through the codec (Encode count replaces this in M4)");
-    addAndMakeVisible (codecButton);
-    codecAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.params, "codecTest", codecButton);
-
-    for (auto* k : { &bitRateKnob, &frameDropKnob })
+    for (auto* k : { &encodeKnob, &bitRateKnob, &frameDropKnob })
     {
         k->setColour (juce::Slider::rotarySliderFillColourId, colours::accent);
         k->setColour (juce::Slider::rotarySliderOutlineColourId, colours::row);
@@ -143,6 +144,8 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
         k->onValueChange = [this] { repaint (codecArea()); };
         addAndMakeVisible (*k);
     }
+    encodeKnob.setColour (juce::Slider::rotarySliderFillColourId, colours::codec);
+    encodeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "encodeCount", encodeKnob);
     bitRateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "bitRate", bitRateKnob);
     frameDropAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "frameDrop", frameDropKnob);
 
@@ -244,9 +247,9 @@ void DrosakaVoiceEditor::resized()
     countKnob.setBounds (wa.getRight() + 32, wa.getY(), 90, 90);
 
     auto ca = codecArea();
-    codecButton.setBounds (ca.getX() + 10, ca.getCentreY() - 14, 170, 28);
-    bitRateKnob.setBounds (ca.getX() + 210, ca.getY() + 4, 46, 46);
-    frameDropKnob.setBounds (ca.getX() + 350, ca.getY() + 4, 46, 46);
+    encodeKnob.setBounds (ca.getX() + 10, ca.getY() + 4, 56, 56);
+    bitRateKnob.setBounds (ca.getX() + 200, ca.getY() + 8, 46, 46);
+    frameDropKnob.setBounds (ca.getX() + 340, ca.getY() + 8, 46, 46);
     pitchLockBox.setBounds (ca.getX() + 490, ca.getCentreY() - 6, 120, 26);
 
     listView.setBounds (16, ca.getBottom() + 34, getWidth() - 32, getHeight() - ca.getBottom() - 34 - 30);
@@ -321,6 +324,17 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
             g.setColour (colours::dim);
             g.drawText (value, c.getRight() + 8, ca.getY() + 28, 90, 14, juce::Justification::centredLeft);
         };
+        {
+            const int nVoices = shownBank != nullptr ? shownBank->size() : 0;
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            g.setColour (colours::codec);
+            g.drawText ("ENCODE", encodeKnob.getRight() + 8, ca.getY() + 12, 100, 16, juce::Justification::centredLeft);
+            g.setFont (juce::FontOptions (11.0f));
+            g.setColour (colours::dim);
+            g.drawText (juce::String (encodeKnob.getValue() * nVoices, 1) + " of " + juce::String (nVoices) + " voices",
+                        encodeKnob.getRight() + 8, ca.getY() + 30, 110, 14, juce::Justification::centredLeft);
+            g.setFont (juce::FontOptions (11.0f));
+        }
         label (bitRateKnob, "BIT RATE", bitRateKnob.getValue() < 0.02 ? "clean" : juce::String (juce::roundToInt (bitRateKnob.getValue() * 100)) + "% crushed");
         label (frameDropKnob, "FRAME DROP", juce::String (juce::roundToInt (frameDropKnob.getValue() * 50)) + "% loss");
         g.setColour (colours::wave);
@@ -346,6 +360,7 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
                 16, listView.getY() - 22, 400, 18, juce::Justification::centredLeft);
     const int infoRight = listView.getX() + listView.getMaximumVisibleWidth() - 4 * 26 - 16;   // matches VoiceRow
     g.drawText ("pitch       formant", infoRight - 200, listView.getY() - 22, 200, 18, juce::Justification::centredRight);
+    g.drawText ("codec order", 16, listView.getY() - 22, listView.getMaximumVisibleWidth() - 4 * 26 - 8 - 190 + 16, 18, juce::Justification::centredRight);
 
     // Footer: errors or missing files.
     auto footer = juce::Rectangle<int> (16, getHeight() - 26, getWidth() - 32, 22);

@@ -10,6 +10,7 @@ namespace
     constexpr int minLag = 20, maxLag = 160;   // 400 Hz .. 50 Hz at 8 kHz
     constexpr float voicingThreshold = 0.38f;
     constexpr float damping = 0.996f;          // bandwidth expansion, ~10 Hz at 8 kHz
+    constexpr float makeup = 1.2f;             // +1.6 dB: centres codec loudness on the dry voice (measured)
 
     // Coarsest bit allocation (bitRate = 1); finest is 8 bits everywhere.
     constexpr int coarseBits[LpcCodec::order + 1] = { 0, 3, 3, 2, 2, 2, 1, 1, 1, 1, 1 };
@@ -77,14 +78,17 @@ void LpcCodec::prepare (double rate, juce::uint32 s)
     {
         auto c = juce::IIRCoefficients::makeLowPass (rate, cut, qs[i]);
         downLp[i].setCoefficients (c);
-
     }
+    // DC blocker: the impulse train has a DC component that de-emphasis boosts ~20 dB,
+    // and it adds coherently across a crowd of encoded voices. 50 Hz keeps deep fundamentals.
+    outHp.setCoefficients (juce::IIRCoefficients::makeHighPass (codecRate, 50.0, 0.7071));
     reset();
 }
 
 void LpcCodec::reset()
 {
     for (auto& f : downLp) f.reset();
+    outHp.reset();
     downPos = 0.0; downPrev = 0.0f;
     histEmph.fill (0.0f); histRaw.fill (0.0f);
     histPos = 0; preEmphPrev = 0.0f; sinceFrame = 0;
@@ -391,7 +395,10 @@ void LpcCodec::synthesise (const Frame& from, const Frame& to)
 
         // De-emphasis, soft safety limit.
         deEmphPrev = f + preEmph * deEmphPrev;
-        const float yv = std::tanh (deEmphPrev * 0.8f) / 0.8f;
+        float hp = deEmphPrev;
+        hp = outHp.processSingleSampleRaw (hp);
+        hp *= makeup;
+        const float yv = std::tanh (hp * 0.8f) / 0.8f;
         fifo[(size_t) fifoWrite] = yv;
         fifoWrite = (fifoWrite + 1) & (fifoLen - 1);
     }

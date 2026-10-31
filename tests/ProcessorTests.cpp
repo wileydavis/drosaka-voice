@@ -1,6 +1,7 @@
 // Offline checks of the processor (no host needed). Build with -DDV_BUILD_TESTS=ON.
 #include "../Source/PluginProcessor.h"
 #include <cstdio>
+#include <algorithm>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { if (cond) std::printf ("  ok   %s\n", msg); \
@@ -269,6 +270,7 @@ int main()
                 c.process (x.data(), y.data(), n);
                 double py = 0; for (auto v : y) { py += v * v; allFinite &= std::isfinite (v); allBounded &= std::abs (v) < 2.0f; }
                 const double db = 10.0 * std::log10 (py / px);
+                if (lock == 2) std::printf ("       tracking, bit rate %.2f: %+.1f dB\n", br, db);
                 if (std::abs (db) >= 3.0) std::printf ("       lock %d bit rate %.2f: level %+.1f dB\n", lock, br, db);
                 levelOk &= std::abs (db) < 3.0;
                 if (br < 0.5f)
@@ -281,6 +283,7 @@ int main()
                         double acc = 0; for (size_t i = 0; i + (size_t) lag < ey.size(); ++i) acc += ex[i] * ey[i + (size_t) lag];
                         if (acc > best) { best = acc; bestLag = lag; }
                     }
+                    if (std::abs (bestLag - expected) > 3) std::printf ("       lock %d bit rate %.2f: lag %d ms, expected %d\n", lock, br, bestLag, expected);
                     alignOk &= std::abs (bestLag - expected) <= 3;
                 }
             }
@@ -341,7 +344,7 @@ int main()
         DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
         juce::StringArray errs; p.addStems ({ toneFile.getFullPathName() }, errs);
         auto dry = run (p, 256, 120, { 0 });
-        p.params.getParameter ("codecTest")->setValueNotifyingHost (1.0f);
+        p.params.getParameter ("encodeCount")->setValueNotifyingHost (1.0f);
         run (p, 256, 10, {});
         auto enc = run (p, 256, 120, { 0 });
         const int a0 = 9600, len2 = 24000;
@@ -356,17 +359,93 @@ int main()
         CHECK (cross / std::sqrt (pd * pe) < 0.9, "codec on primary: audibly different waveform from dry");
 
         // Flip it on and off mid-phrase: crossfades, no clicks.
-        p.params.getParameter ("codecTest")->setValueNotifyingHost (0.0f);
+        p.params.getParameter ("encodeCount")->setValueNotifyingHost (0.0f);
         run (p, 256, 10, {});
         auto sw = run (p, 256, 120, { 0 }, [&] (int blk)
         {
-            if (blk == 40) p.params.getParameter ("codecTest")->setValueNotifyingHost (1.0f);
-            if (blk == 80) p.params.getParameter ("codecTest")->setValueNotifyingHost (0.0f);
+            if (blk == 40) p.params.getParameter ("encodeCount")->setValueNotifyingHost (1.0f);
+            if (blk == 80) p.params.getParameter ("encodeCount")->setValueNotifyingHost (0.0f);
         });
         // A click shows up as a step bigger than anything the dry or codec signal makes on its own.
         const float natural = juce::jmax (maxJump (dry), maxJump (enc));
         std::printf ("       max step: dry/codec %.4f, while switching %.4f\n", natural, maxJump (sw));
         CHECK (maxJump (sw) < natural * 1.25f, "switching the codec mid-phrase crossfades without clicks");
+    }
+
+
+    std::printf ("encode count\n");
+    {
+        auto b = fakeBank ({ 100, 200, 300, 400, 500, 600, 700, 800, 900 }, 4);   // primary in the middle
+        const auto& o = b->encodeOrder;
+        CHECK (o.size() == 9 && o.back() == 4, "every voice in the order, primary last");
+        auto sorted = o; std::sort (sorted.begin(), sorted.end());
+        bool perm = true; for (int i = 0; i < 9; ++i) perm &= sorted[(size_t) i] == i;
+        CHECK (perm, "order is a permutation of the bank");
+        bool alternates = true;
+        for (size_t i = 1; i + 1 < o.size(); ++i) alternates &= (o[i] < 4) != (o[i - 1] < 4);
+        CHECK (alternates, "infection alternates left/right of the primary (jumps around the head)");
+        auto again = fakeBank ({ 100, 200, 300, 400, 500, 600, 700, 800, 900 }, 4);
+        CHECK (again->encodeOrder == o, "fixed seed: same bank, same order");
+        bool notSequential = false;
+        for (size_t i = 1; i + 1 < o.size(); ++i) notSequential |= std::abs (o[i] - o[i - 1]) > 2;
+        CHECK (notSequential, "order is scattered, not a sweep through the array");
+
+        auto edge = fakeBank ({ 100, 200, 300, 400 }, 0);   // primary at the edge: one side only
+        CHECK (edge->encodeOrder.size() == 4 && edge->encodeOrder.back() == 0, "primary last even at the array's edge");
+
+        float e[maxVoices];
+        computeEncode (*b, 0.0f, e);
+        CHECK (*std::max_element (e, e + 9) == 0.0f, "Encode 0 -> all dry");
+        computeEncode (*b, 1.0f, e);
+        CHECK (e[o[0]] == 1.0f && std::count (e, e + 9, 0.0f) == 8, "Encode 1 -> exactly one voice, at full strength");
+        computeEncode (*b, 2.5f, e);
+        CHECK (e[o[0]] == 1.0f && e[o[1]] == 1.0f && std::abs (e[o[2]] - 0.5f) < 1e-6f, "voices cross over one at a time");
+        computeEncode (*b, 8.0f, e);
+        CHECK (e[4] == 0.0f && std::count (e, e + 9, 1.0f) == 8, "Encode all-but-one -> only the primary still human");
+        computeEncode (*b, 9.0f, e);
+        CHECK (std::count (e, e + 9, 1.0f) == 9, "Encode all -> the primary falls last");
+
+        b->primary = 7; b->resort();
+        CHECK (b->encodeOrder.back() == 7, "changing the primary re-plans the order with it last");
+    }
+
+    std::printf ("encode count in the engine\n");
+    {
+        juce::StringArray paths;
+        const float f0s[] = { 110, 130, 150, 175, 200 };
+        for (int i = 0; i < 5; ++i)
+            paths.add (writeWav ("v" + juce::String (i) + ".wav", voiceTone (f0s[i], 0.3f, rate, (int) rate * 2), rate).getFullPathName());
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems (paths, errs);
+        setCount (p, 1.0f);
+        auto enc = [&] (float v) { p.params.getParameter ("encodeCount")->setValueNotifyingHost (v); };
+        enc (0.0f); run (p, 256, 10, {});
+        auto dry = run (p, 256, 300, { 0 });
+        enc (1.0f); run (p, 256, 10, {});
+        auto full = run (p, 256, 300, { 0 });
+        enc (0.0f); run (p, 256, 10, {});
+        auto sweep = run (p, 256, 300, { 0 }, [&] (int blk) { enc (juce::jlimit (0.0f, 1.0f, (float) (blk - 30) / 240.0f)); });
+        const float natural = juce::jmax (maxJump (dry), maxJump (full));
+        std::printf ("       max step: dry/encoded %.4f, sweeping Encode %.4f\n", natural, maxJump (sweep));
+        CHECK (maxJump (sweep) < natural * 1.25f, "sweeping Encode across the crowd: no clicks");
+        auto rms = [] (const juce::AudioBuffer<float>& b2, int a, int n) { return b2.getRMSLevel (0, a, n) + b2.getRMSLevel (1, a, n); };
+        const double ratio = 20.0 * std::log10 (rms (full, 20000, 40000) / rms (dry, 20000, 40000));
+        std::printf ("       fully encoded vs dry crowd level: %+.1f dB\n", ratio);
+        {
+            // Coherence: crowd power vs the sum of each voice's power, dry and encoded.
+            auto pw = [] (const juce::AudioBuffer<float>& b2) { double a = 0; for (int i = 20000; i < 60000; ++i) a += b2.getSample (0, i) * b2.getSample (0, i); return a; };
+            double sd = 0, se = 0;
+            for (int v = 0; v < 5; ++v)
+            {
+                p.setSolo (v, true);
+                enc (0.0f); run (p, 256, 10, {}); sd += pw (run (p, 256, 300, { 0 }));
+                enc (1.0f); run (p, 256, 10, {}); se += pw (run (p, 256, 300, { 0 }));
+                p.setSolo (v, false);
+            }
+            std::printf ("       dry: crowd/sum-of-solos %+.1f dB   encoded: %+.1f dB\n", 10 * std::log10 (pw (dry) * 5 / sd), 10 * std::log10 (pw (full) * 5 / se));
+            CHECK (std::abs (10 * std::log10 (pw (full) * 5 / se)) < 1.0, "encoded voices add like independent voices (no shared DC)");
+        }
+        CHECK (std::abs (ratio) < 3.0, "fully encoded crowd within 3 dB of the dry crowd");
     }
 
     std::printf ("milestone 1 sets still open\n");

@@ -6,10 +6,59 @@
 
 struct Setting { const char* name; bool codec; float bitRate, frameDrop; int lock; };
 
+// Gesture render: DrosakaVoiceRender --build <out.wav> <primary.wav> <other stems...>
+// Six loops of the phrase: crowd builds (Count 0 -> all), the codec infects it over four
+// loops (Encode 0 -> all, primary last), then the drop: back to the single human voice.
+static int renderBuild (int argc, char** argv)
+{
+    const double rate = 48000.0;
+    DrosakaVoiceProcessor p;
+    p.prepareToPlay (rate, 512);
+    juce::StringArray paths, errs;
+    for (int i = 3; i < argc; ++i) paths.add (juce::File (argv[i]).getFullPathName());
+    p.addStems (paths, errs);
+    if (p.getBank()->size() < 2) { std::printf ("need several stems\n"); return 1; }
+    auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+    set ("bitRate", 0.45f);
+    set ("count", 0.0f);
+    set ("encodeCount", 0.0f);
+
+    const auto& st = *p.getBank()->stems[0];
+    const int loopLen = (int) (st.audio.getNumSamples() * rate / st.sampleRate) + (int) (0.15 * rate);
+    const int loops = 6, total = loopLen * loops + p.getLatencySamples() + (int) rate;
+    const int n = p.getBank()->size();
+    juce::AudioBuffer<float> out (2, total), block (2, 512);
+    for (int pos = 0; pos < total; pos += 512)
+    {
+        const double loopPos = (double) pos / loopLen;   // 0 .. 6
+        float count, encode;
+        if (loopPos < 1.0)      { count = (float) loopPos; encode = 0.0f; }
+        else if (loopPos < 5.0) { count = 1.0f; encode = (float) ((loopPos - 1.0) / 4.0); }
+        else                    { count = 1.0f / (float) n; encode = 0.0f; }   // the drop: one human voice
+        set ("count", count);
+        set ("encodeCount", juce::jmin (1.0f, encode));
+        juce::MidiBuffer midi;
+        for (int l = 0; l < loops; ++l)
+            if (l * loopLen >= pos && l * loopLen < pos + 512)
+                midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), l * loopLen - pos);
+        p.processBlock (block, midi);
+        const int m = juce::jmin (512, total - pos);
+        for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, pos, block, ch, 0, m);
+    }
+    const juce::File f (argv[2]);
+    f.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), rate, 2, 24, {}, 0));
+    w->writeFromAudioSampleBuffer (out, p.getLatencySamples(), total - p.getLatencySamples());
+    std::printf ("wrote %s: %d voices, %.1f s, peak %.2f\n", f.getFullPathName().toRawUTF8(), n, total / rate, out.getMagnitude (0, total));
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
-    if (argc < 3) { std::printf ("usage: DrosakaVoiceRender <stem> <out-dir>\n"); return 1; }
     juce::ScopedJuceInitialiser_GUI init;
+    if (argc >= 4 && juce::String (argv[1]) == "--build") return renderBuild (argc, argv);
+    if (argc < 3) { std::printf ("usage: DrosakaVoiceRender <stem> <out-dir>  |  --build <out.wav> <primary> <stems...>\n"); return 1; }
     const double rate = 48000.0;
     const juce::File stem (argv[1]), outDir (argv[2]);
     outDir.createDirectory();
@@ -42,7 +91,7 @@ int main (int argc, char** argv)
         juce::StringArray errs;
         if (p.addStems ({ stem.getFullPathName() }, errs) != 1) { std::printf ("can't load stem\n"); return 1; }
         auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
-        set ("codecTest", s.codec ? 1.0f : 0.0f);
+        set ("encodeCount", s.codec ? 1.0f : 0.0f);
         set ("bitRate", s.bitRate);
         set ("frameDrop", s.frameDrop);
         set ("pitchLock", (float) s.lock);
