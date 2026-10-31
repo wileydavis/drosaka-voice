@@ -941,6 +941,180 @@ int main()
         CHECK (resaved.getSize() > 50000, "and are saved with their audio embedded from then on");
     }
 
+
+    std::printf ("patterns (steps)\n");
+    {
+        auto runSteps = [] (pattern::Params pp, int regions, int steps, std::vector<std::vector<pattern::Hit>>& out, pattern::State st = {})
+        {
+            double ppq = st.startPpq;
+            for (int k = 0; k < steps; ++k)
+            {
+                pattern::Hit h[8]; int nh = 0;
+                const double len = pattern::nextStep (st, pp, regions, ppq, h, nh);
+                out.emplace_back (h, h + nh);
+                ppq += len;
+            }
+            return st;
+        };
+        auto slicesOf = [] (const std::vector<std::vector<pattern::Hit>>& v)
+        {
+            std::vector<int> r; for (auto& step : v) r.push_back (step.empty() ? -1 : step[0].slice); return r;
+        };
+        pattern::Params pp; pp.division = 0.5;
+        std::vector<std::vector<pattern::Hit>> v;
+
+        pp.type = pattern::walk; runSteps (pp, 4, 6, v);
+        CHECK (slicesOf (v) == std::vector<int> ({ 0, 1, 2, 3, 0, 1 }), "Walk: one slice per step, in order, looping");
+
+        v.clear(); pp.type = pattern::repeat; pp.repeats = 3; runSteps (pp, 3, 7, v);
+        CHECK (slicesOf (v) == std::vector<int> ({ 0, 0, 0, 1, 1, 1, 2 }), "Repeat: each slice N times, then on");
+
+        v.clear(); pp.type = pattern::stutter; pp.repeats = 4; runSteps (pp, 3, 3, v);
+        CHECK (v[0].size() == 1 && v[1].size() == 4 && v[1][3].offset == 0.375 && v[1][0].length == 0.125 && v[1][0].slice == 0 && v[2][0].slice == 1,
+               "Stutter: the slice, then N shorter retriggers of it, then on");
+
+        v.clear(); pp.type = pattern::screwed; pp.drop = 7.0f; runSteps (pp, 2, 2, v);
+        CHECK (v[0][0].pitch == -7.0f && v[0][0].fit && v[1][0].slice == 1, "Screwed: pitched down by Drop, fitted to the step");
+
+        v.clear(); pp.type = pattern::skipRewind; pp.density = 0.0f; runSteps (pp, 4, 8, v);
+        CHECK (slicesOf (v) == std::vector<int> ({ 0, 1, 2, 3, 0, 1, 2, 3 }), "Skip/Rewind at density 0 = Walk");
+        v.clear(); pp.density = 1.0f; runSteps (pp, 4, 400, v);
+        int silent = 0, back = 0; int prev = -1;
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            if (v[i].empty()) ++silent;
+            else { if (prev >= 0 && v[i][0].slice == prev) ++back; prev = v[i][0].slice; }
+        }
+        std::printf ("       Skip/Rewind at full density over 400 steps: %d silent, %d rewinds\n", silent, back);
+        CHECK (silent > 150 && silent < 250 && back > 50, "Skip/Rewind at full density: about half the steps silent, the rest stepping back");
+        std::vector<std::vector<pattern::Hit>> v2; runSteps (pp, 4, 400, v2);
+        CHECK (slicesOf (v) == slicesOf (v2), "Skip/Rewind is repeatable (same pattern every time)");
+
+        v.clear(); pp.type = pattern::ratchet; pp.division = 0.5; runSteps (pp, 4, 30, v);
+        std::vector<double> lens; for (auto& step : v) lens.push_back (step[0].length);
+        CHECK (lens[0] == 0.5 && lens[7] == 0.5 && lens[8] == 0.25 && lens[23] == 0.25 && lens[24] == 0.125,
+               "Ratchet: the division halves every bar, accelerating");
+
+        v.clear(); pp.type = pattern::random; pp.density = 1.0f; runSteps (pp, 5, 15, v);
+        bool perms = true, differs = false;
+        for (int c = 0; c < 3; ++c)
+        {
+            std::vector<int> cyc; for (int i = 0; i < 5; ++i) cyc.push_back (v[(size_t) (c * 5 + i)][0].slice);
+            auto sorted = cyc; std::sort (sorted.begin(), sorted.end());
+            perms &= sorted == std::vector<int> ({ 0, 1, 2, 3, 4 });
+            if (c > 0) for (int i = 0; i < 5; ++i) differs |= v[(size_t) (c * 5 + i)][0].slice != v[(size_t) i][0].slice;
+        }
+        CHECK (perms && differs, "Random: every slice once per pass, a new order each pass");
+        v.clear(); pp.density = 0.5f; runSteps (pp, 5, 400, v);
+        int fired = 0; for (auto& step : v) fired += step.empty() ? 0 : 1;
+        CHECK (fired > 160 && fired < 240, "Random density 50%: about half the steps fire");
+
+        v.clear(); pp.type = pattern::walk;
+        pattern::State st; st.slice = 0;
+        pattern::Hit h[8]; int nh = 0;
+        pattern::nextStep (st, pp, 6, 0.0, h, nh);
+        st.jump = 4;
+        pattern::nextStep (st, pp, 6, 0.5, h, nh);
+        const int jumped = h[0].slice;
+        pattern::nextStep (st, pp, 6, 1.0, h, nh);
+        CHECK (jumped == 4 && h[0].slice == 5, "a held slice key: the walk jumps there on the next step, then carries on");
+    }
+
+    std::printf ("patterns (engine)\n");
+    {
+        // Two aligned voices; four slices of 0.4 s.
+        auto tA = voiceTone (140.0f, 0.4f, rate, (int) (rate * 1.6)), tB = voiceTone (180.0f, 0.4f, rate, (int) (rate * 1.6));
+        auto fA = writeWav ("pt_a.wav", tA, rate), fB = writeWav ("pt_b.wav", tB, rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        TestPlayHead ph; ph.bpm = 120.0; ph.ppq = 0.0; p.setPlayHead (&ph);
+        juce::StringArray errs; p.addStems ({ fA.getFullPathName(), fB.getFullPathName() }, errs);
+        p.addSlice (0.4); p.addSlice (0.8); p.addSlice (1.2);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        set ("playMode", 1.0f); set ("patternType", 0.0f); set ("patternDiv", 1.0f); set ("gate", 0.5f);   // Walk, 1/8, half-length hits
+        const double spb = rate * 60.0 / ph.bpm;
+        const int L = p.getLatencySamples();
+
+        // Play: note events at given blocks; record output.
+        auto perform = [&] (int blocks, std::vector<std::tuple<int, int, bool>> events)   // block, note, on?
+        {
+            juce::AudioBuffer<float> out (2, 256 * blocks), blk (2, 256);
+            for (int k = 0; k < blocks; ++k)
+            {
+                juce::MidiBuffer m;
+                for (auto& [bk, note, on] : events)
+                    if (bk == k) m.addEvent (on ? juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) : juce::MidiMessage::noteOff (1, note), 37);
+                p.processBlock (blk, m);
+                ph.ppq += 256.0 / spb;
+                for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
+            }
+            return out;
+        };
+        auto energy = [] (const juce::AudioBuffer<float>& o, int a, int n2)
+        {
+            if (a < 0 || a + n2 > o.getNumSamples()) return 0.0f;
+            return o.getRMSLevel (0, a, n2) + o.getRMSLevel (1, a, n2);
+        };
+
+        // Key down at beat 0.1 (block ~9): the walk starts on the next 1/8 line (beat 0.5).
+        const double startPpq = ph.ppq;
+        auto out = perform (600, { { 9, 48, true }, { 400, 48, false } });
+        const double pressPpq = startPpq + (9 * 256 + 37) / spb;
+        const double first = std::ceil (pressPpq / 0.5) * 0.5;
+        int onTime = 0, total = 0;
+        for (int k = 0; k < 8; ++k)   // the 8 lines before the key is released at block 400
+        {
+            const int at = (int) std::round ((first + 0.5 * k - startPpq) * spb) + L;   // heard L later (Live compensates)
+            ++total;
+            if (energy (out, at + 100, 2400) > 0.02f && energy (out, at - 3000, 2400) < 0.002f) ++onTime;
+        }
+        std::printf ("       Walk 1/8: %d of %d hits start exactly on their grid line\n", onTime, total);
+        CHECK (onTime == total, "hits land on the 1/8 grid, with silence between them (Gate 50%)");
+        const int releaseAt = 400 * 256 + 37;
+        CHECK (energy (out, releaseAt + L + (int) (0.5 * spb) + 2000, 20000) < 1e-3f, "releasing the key stops the walk");
+
+        // Latch: keeps going after release.
+        set ("latch", 1.0f);
+        auto latched = perform (600, { { 5, 48, true }, { 60, 48, false } });
+        CHECK (energy (latched, 400 * 256, 24000) > 0.02f, "Latch: the walk keeps running after the key is released");
+        set ("latch", 0.0f);
+        perform (60, {});
+        CHECK (! p.patternActive.load(), "turning Latch off stops it");
+
+        // A slice key starts the walk from that slice, and holding one mid-walk jumps there.
+        perform (200, { { 3, 62, true }, { 10, 62, false } });   // starts at slice 2 (D3)
+        perform (100, {});
+        perform (300, { { 3, 48, true }, { 100, 63, true }, { 101, 63, false }, { 290, 48, false } });
+        // (the jump is checked through the slice that plays right after the press)
+        auto jumpRun = perform (400, { { 3, 48, true }, { 150, 62, true } });
+        const int sliceAfterJump = p.patternSlice.load();
+        perform (20, { { 0, 62, false }, { 0, 48, false } });
+        CHECK (sliceAfterJump == 2 || sliceAfterJump == 3, "holding a slice key mid-walk jumps the walk to it");
+
+        // Screwed: the same slices, pitched down by Drop and fitted to the step.
+        set ("patternType", 3.0f); set ("dropSemis", 7.0f); set ("gate", 1.0f); set ("patternDiv", 0.0f);   // 1/4 steps: 0.5 s
+        p.setSolo (0, true);   // one voice, so the pitch is measurable
+        auto scr = perform (500, { { 5, 48, true } });
+        perform (20, { { 0, 48, false } });
+        juce::AudioBuffer<float> mono (1, 24000);
+        for (int i = 0; i < 24000; ++i) mono.setSample (0, i, scr.getSample (0, 60000 + i) + scr.getSample (1, 60000 + i));
+        const float pitch = analyseStem (mono.getReadPointer (0), 24000, rate).pitchHz;
+        p.setSolo (0, false);
+        std::printf ("       Screwed (Drop 7 st): %.1f Hz from a 140 Hz voice (want %.1f)\n", pitch, 140.0 * std::exp2 (-7 / 12.0));
+        CHECK (std::abs (pitch - 140.0f * std::exp2 (-7.0f / 12.0f)) < 3.0f, "Screwed: hits are pitched down by Drop");
+        bool finite = true; for (int i = 0; i < scr.getNumSamples(); ++i) finite &= std::isfinite (scr.getSample (0, i));
+        CHECK (finite, "stretched hits stay finite");
+
+        // Stretch: a 0.4 s slice in a 0.5 s step at Gate 100% fills the step.
+        set ("patternType", 0.0f);
+        auto fill = perform (500, { { 5, 48, true } });
+        perform (20, { { 0, 48, false } });
+        int gaps = 0;
+        for (int i = 40000; i + 1200 < 100000; i += 1200) if (energy (fill, i, 1200) < 0.002f) ++gaps;
+        CHECK (gaps <= 2, "a slice shorter than its step is stretched to fill it");
+        p.setPlayHead (nullptr);
+        (void) jumpRun; (void) latched;
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

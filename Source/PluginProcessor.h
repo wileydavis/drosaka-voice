@@ -8,6 +8,7 @@
 #include "LpcCodec.h"
 #include "Spread.h"
 #include "Spatial.h"
+#include "Pattern.h"
 
 //==============================================================================
 // Voice bank (M2) + codec (M3).
@@ -101,6 +102,8 @@ public:
     }
     std::atomic<int> audibleVoices { 0 };
     std::atomic<float> hostBpm { 120.0f };
+    std::atomic<bool> patternActive { false };
+    std::atomic<int> patternSlice { -1 };
     std::atomic<bool> hostPlaying { false };
     float getVoicePan (int stemIndex) const
     {
@@ -142,18 +145,22 @@ private:
     struct Instance   // one triggered playback of the whole bank
     {
         bool active = false;
-        double t = 0.0;          // position on the phrase timeline, host samples (slices start mid-phrase)
-        double stopT = 1e18;     // where this note's slice ends
+        double startPos = 0.0;   // where on the phrase timeline the hit starts (host samples)
+        double out = 0.0;        // output samples since the hit
+        double speed = 1.0;      // phrase samples per output sample (pattern stretch)
+        double stopOut = 1e18;   // hit length in output samples (slice end, or step x gate)
+        float pitchSemis = 0.0f; // per-hit transpose (Screwed)
         bool releasing = false;
         float env = 0.0f, envTarget = 0.0f, envStep = 0.0f;
-        Psola psola[maxVoices];
+        Psola psola[maxVoices];      // Spread (x hit pitch): shiftBuf
+        Psola psolaRaw[maxVoices];   // hit pitch only, for stretched/pitched hits: dryBuf
     };
 
     Stem::Ptr importStem (const juce::File&, juce::String& error);
     Stem::Ptr readStem (juce::AudioFormatReader*, const juce::File& displayFile, juce::String& error, bool encodeForEmbedding);
     void swapBank (Bank::Ptr, bool structural = true);
     void autoAlign (Bank& b, int stemIndex);
-    void startInstance (double startT, double stopT);
+    void startInstance (double startPos, double lengthOut, double speed, float pitchSemis);
     // All stems, mono: direct playback into dryBuf, pitch-shifted into shiftBuf where asked.
     void renderDry (int start, int num, Bank& bank, const float* psolaRatio, const bool* wantPsola);
 
@@ -184,6 +191,25 @@ private:
     std::atomic<float>* motionDivParam = nullptr;
     std::atomic<float>* encodeQuantParam = nullptr;
     double internalPpq = 0.0, lastBpm = 120.0;
+
+    // Pattern mode (audio thread).
+    struct PendingHit { double ppq; pattern::Hit hit; };
+    std::atomic<float>* playModeParam = nullptr;
+    std::atomic<float>* patternTypeParam = nullptr;
+    std::atomic<float>* patternDivParam = nullptr;
+    std::atomic<float>* gateParam = nullptr;
+    std::atomic<float>* densityParam = nullptr;
+    std::atomic<float>* repeatsParam = nullptr;
+    std::atomic<float>* dropSemisParam = nullptr;
+    std::atomic<float>* latchParam = nullptr;
+    bool patternRunning = false;
+    pattern::State patternState;
+    double nextStepPpq = 0.0;
+    PendingHit pending[32];
+    int numPending = 0;
+    bool held[128] {};
+    void patternNote (const juce::MidiMessage&, double ppqAtEvent, const Bank&);
+    void fireHit (const pattern::Hit&, const Bank&, double bpm);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
     float latchedEncodeVoices = 0.0f;
     std::vector<float> codecOut = std::vector<float> (chunkSize);

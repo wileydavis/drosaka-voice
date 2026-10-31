@@ -30,7 +30,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
 | 5 Spread (+ stem alignment) | ✅ done — tested in Live, sounds great |
 | 6 Spatial modes + tempo sync | ✅ done — tested in Live, sounds good |
-| 7 Slicing + presets w/ embedded audio | Written and passing offline tests. **Awaiting ear test in Live** |
+| 7 Slicing + presets w/ embedded audio | ✅ done — tested in Live, worked perfectly |
 
 ### Milestone 7 behaviour (as built)
 
