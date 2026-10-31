@@ -4,12 +4,15 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <atomic>
 #include "Bank.h"
+#include "LpcCodec.h"
 
 //==============================================================================
-// Milestone 2: voice bank.
+// Voice bank (M2) + codec (M3).
 //   - a bank of time-aligned stems, all fired together by any MIDI note
 //   - auto-sorted by pitch or formant; one primary in the centre
 //   - Count builds the crowd outward from the primary in pairs, crossfading smoothly
+//   - every voice runs through its own LPC codec; dry voices are delayed to match the
+//     codec's latency (reported to the host). M3: a test switch puts the primary on the codec.
 class DrosakaVoiceProcessor : public juce::AudioProcessor
 {
 public:
@@ -71,6 +74,16 @@ public:
     std::atomic<int> bankGeneration { 0 };
 
 private:
+    static constexpr int chunkSize = 512;   // processing sub-block
+
+    struct VoiceDsp   // per bank slot, audio thread only
+    {
+        LpcCodec codec;
+        std::vector<float> delay;   // dry path, delayed by the codec latency
+        int delayPos = 0;
+        float encode = 0.0f;        // smoothed 0 = dry .. 1 = codec
+    };
+
     struct Instance   // one triggered playback of the whole bank
     {
         bool active = false;
@@ -81,8 +94,7 @@ private:
     Stem::Ptr importStem (const juce::File&, juce::String& error);
     void swapBank (Bank::Ptr);
     void startInstance();
-    void renderChunk (juce::AudioBuffer<float>& out, int start, int num, Bank& bank,
-                      const float* g0, const float* g1, const float* p0, const float* p1, int blockLen, int blockOffset);
+    void renderDry (int start, int num, Bank& bank);   // all stems, mono, into dryBuf
 
     juce::AudioFormatManager formatManager;
 
@@ -93,6 +105,15 @@ private:
     juce::StringArray missingPaths;
 
     std::atomic<float>* countParam = nullptr;
+    std::atomic<float>* codecParam = nullptr;
+    std::atomic<float>* bitRateParam = nullptr;
+    std::atomic<float>* frameDropParam = nullptr;
+    std::atomic<float>* pitchLockParam = nullptr;
+
+    VoiceDsp voiceDsp[maxVoices];
+    juce::AudioBuffer<float> dryBuf { maxVoices, chunkSize };
+    std::vector<float> codecOut = std::vector<float> (chunkSize);
+    int latency = 0;
 
     Instance instances[2];
     int current = 0;

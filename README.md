@@ -25,12 +25,32 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 |---|---|
 | 0 Toolchain | ✅ done — builds on Mac, AU + VST3 load in Live |
 | 1 Sample player | ✅ done — tested in Live (AU + VST3), no issues |
-| 2 Voice bank | Written and passing offline tests. **Awaiting ear test in Live** |
-| 3 Codec, single voice | not started |
+| 2 Voice bank | ✅ done — tested in Live, works |
+| 3 Codec, single voice | Written and passing offline tests. **Awaiting ear test in Live** |
 | 4 Encode count | not started |
 | 5 Spread | not started |
 | 6 Spatial modes + tempo sync | not started |
 | 7 Slicing + presets w/ embedded audio | not started |
+
+### Milestone 3 behaviour (as built)
+
+- **CODEC ON PRIMARY** puts the primary voice through the codec, with a 30 ms crossfade. It's a temporary test switch: Milestone 4's Encode count replaces it
+- **Bit rate** runs from clean to crushed: coefficient bits drop from 8 down to LPC-10-ish and then to 1–3 bits. Gain and pitch steps coarsen, and above ~60% the frame rate halves and then thirds
+- **Frame drop** is simulated packet loss, up to 50% of frames, bursty: a lost frame replays once as a half-level ghost, then the line cuts out
+- **Pitch lock: Fixed / Free / Tracking**, defined in `SPEC.md`. Free is my reading of an undefined term, so judge it by ear
+- **Codec:** 8 kHz, 10th-order LPC, 22.5 ms frames, impulse or noise excitation, band-limited at about 3.6 kHz
+- **Latency:** the plugin reports ~39 ms to Live, and every voice, dry or encoded, stays aligned
+
+Listening renders without Live: `DrosakaVoiceRender <stem.wav> <out-dir>` writes one file per setting plus `tour.wav`.
+
+### Milestone 3 test in Live
+
+1. Load a bank, set Count to 1 voice, play the phrase, and toggle **CODEC ON PRIMARY** while it plays: it should switch smoothly, with no click or timing jump
+2. Sweep **Bit rate** from clean to full: it should go from telephone-vocoder to radio to barely intelligible. *Main question: radio, or just vocoder?*
+3. Raise **Frame drop**: it should drop out like a bad link
+4. Try **Fixed / Free / Tracking**: does Free mean what you meant?
+5. Put the device on a track with drums: the voice should still sit on the grid (Live is compensating the ~39 ms)
+6. Turn Count up with the codec on: the crowd stays dry and in sync with the encoded primary
 
 ### Milestone 2 behaviour (as built)
 

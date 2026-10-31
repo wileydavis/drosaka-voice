@@ -31,6 +31,9 @@ Simulated packet loss
 Codec: pitch lock
 Excitation pitch fixed, free, or tracking
 The codec runs as one encoder instance per voice with shared settings (about 20 channels at 8 kHz; CPU is not a concern).
+  [decided Oct 30, M3] Pitch lock modes as built — Fixed: monotone at the voice's own analysed median pitch, consonants still hiss. Tracking: follows the voice's pitch contour (median-smoothed), consonants hiss. Free: raw pitch detector, unsmoothed, held through consonants and never switching to noise, so everything buzzes and the pitch jumps where the detector lands. (Free was undefined in the spec; this reading needs Wiley's ear.)
+  [decided Oct 30, M3] Frame drop: 0–100% = 0–50% of transmitted frames lost, in bursts. A lost frame replays the last good one once at half level; a second loss in a row is silence. Bit rate also lowers the frame rate above ~60% (frames repeat 2× above 60%, 3× above 85%), alongside coarser coefficients, gain and pitch steps.
+  [decided Oct 30, M3] Every voice's codec runs continuously; dry voices are delayed to match it, and the plugin reports that delay (~39 ms) to Live, which compensates so notes stay on the grid.
 Spread (pitch)
 One playable knob that moves the crowd from unison to chorus to chord to cluster, continuously, for builds.
 • Each voice has a continuous pitch path: 0 cents, then a detune (cents), then its chord interval, then its cluster position (voices a semitone apart). Spread is a position along that path, so every voice glides and nothing steps

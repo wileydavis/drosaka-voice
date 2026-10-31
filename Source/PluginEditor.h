@@ -33,6 +33,16 @@ private:
     juce::TextButton sortPitch { "Pitch" }, sortFormant { "Formant" };
     juce::Slider countKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> countAttachment;
+
+    // Codec strip (M3).
+    juce::TextButton codecButton { "CODEC ON PRIMARY" };
+    juce::Slider bitRateKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider frameDropKnob { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::ComboBox pitchLockBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> codecAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> bitRateAttachment, frameDropAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> pitchLockAttachment;
+    juce::Rectangle<int> codecArea() const;
     juce::Viewport listView;
     juce::Component listContent;
     std::vector<std::unique_ptr<VoiceRow>> rows;

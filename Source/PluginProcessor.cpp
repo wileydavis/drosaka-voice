@@ -6,6 +6,7 @@ namespace
     constexpr double fadeMs = 3.0;          // retrigger crossfade, start/end fades
     constexpr double gainGlideSec = 0.05;   // crowd gain: full 0->1 move takes 50 ms
     constexpr double panGlideSec = 0.10;    // pan: full L->R move takes 100 ms
+    constexpr double encodeGlideSec = 0.03; // dry <-> codec crossfade
     constexpr int peakBins = 1024;
     constexpr double maxStemSeconds = 120.0;
 
@@ -29,6 +30,10 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
 {
     formatManager.registerBasicFormats();
     countParam = params.getRawParameterValue ("count");
+    codecParam = params.getRawParameterValue ("codecTest");
+    bitRateParam = params.getRawParameterValue ("bitRate");
+    frameDropParam = params.getRawParameterValue ("frameDrop");
+    pitchLockParam = params.getRawParameterValue ("pitchLock");
     bank = new Bank();
 }
 
@@ -40,6 +45,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
         juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f,
         juce::AudioParameterFloatAttributes().withStringFromValueFunction (
             [] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; })));
+
+    // Codec (M3). The test switch is temporary: Encode count replaces it in M4.
+    auto pct = juce::AudioParameterFloatAttributes().withStringFromValueFunction (
+        [] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; });
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "codecTest", 1 }, "Codec on primary (M3 test)", false));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "bitRate", 1 }, "Codec bit rate",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.35f, pct));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "frameDrop", 1 }, "Codec frame drop",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "pitchLock", 1 }, "Codec pitch lock",
+        juce::StringArray { "Fixed", "Free", "Tracking" }, 2));
     return layout;
 }
 
@@ -55,6 +71,18 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
     fadeSamples = juce::jmax (1, (int) std::round (fadeMs * 0.001 * sampleRate));
     for (auto& i : instances) i = {};
     playhead = -1.0f;
+
+    latency = LpcCodec::latencySamples (sampleRate);
+    setLatencySamples (latency);
+    const int ringLen = juce::nextPowerOfTwo (latency + chunkSize + 1);
+    for (int v = 0; v < maxVoices; ++v)
+    {
+        auto& d = voiceDsp[v];
+        d.codec.prepare (sampleRate, (juce::uint32) (v + 1));   // fixed seed per slot
+        d.delay.assign ((size_t) ringLen, 0.0f);
+        d.delayPos = 0;
+        d.encode = 0.0f;
+    }
 }
 
 //==============================================================================
@@ -206,14 +234,9 @@ void DrosakaVoiceProcessor::startInstance()
     in.envStep = 1.0f / (float) fadeSamples;
 }
 
-void DrosakaVoiceProcessor::renderChunk (juce::AudioBuffer<float>& out, int start, int num, Bank& b,
-                                         const float* gl0, const float* gr0, const float* gl1, const float* gr1,
-                                         int blockLen, int blockOffset)
+void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b)
 {
-    auto* outL = out.getWritePointer (0);
-    auto* outR = out.getWritePointer (1);
     const int n = juce::jmin (b.size(), maxVoices);
-    const float invBlock = 1.0f / (float) blockLen;
 
     // Longest stem, in host samples: an instance ends when every stem has.
     double longest = 0.0;
@@ -229,10 +252,9 @@ void DrosakaVoiceProcessor::renderChunk (juce::AudioBuffer<float>& out, int star
 
         for (int s = 0; s < n; ++s)
         {
-            if (gl0[s] + gl1[s] + gr0[s] + gr1[s] <= 0.0f) continue;   // gains are never negative   // silent voice
-
             const auto& st = *b.stems[(size_t) s];
             const float* src = st.audio.getReadPointer (0);
+            float* dst = dryBuf.getWritePointer (s, start);
             const int len = st.audio.getNumSamples();
             const double step = st.sampleRate / hostRate;
             const double endFadeLen = fadeSamples * step;
@@ -249,11 +271,7 @@ void DrosakaVoiceProcessor::renderChunk (juce::AudioBuffer<float>& out, int star
                 const float frac = (float) (pos - i0);
                 const float x = src[i0] + frac * (src[i0 + 1] - src[i0]);
                 const float tail = (float) juce::jmin (1.0, (len - 1 - pos) / endFadeLen);
-
-                const float a = (float) (blockOffset + j) * invBlock;
-                const float g = env * tail * x;
-                outL[start + j] += g * (gl0[s] + a * (gl1[s] - gl0[s]));
-                outR[start + j] += g * (gr0[s] + a * (gr1[s] - gr0[s]));
+                dst[j] += env * tail * x;
 
                 if (! juce::exactlyEqual (envStep, 0.0f))
                 {
@@ -264,7 +282,6 @@ void DrosakaVoiceProcessor::renderChunk (juce::AudioBuffer<float>& out, int star
             }
         }
 
-        // Advance the instance's envelope and clock past this chunk.
         if (! juce::exactlyEqual (in.envStep, 0.0f))
         {
             in.env += in.envStep * (float) num;
@@ -293,38 +310,88 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     Bank& b = *bank;
     const int n = juce::jmin (b.size(), maxVoices);
 
-    // Crowd targets for this block, then glide each voice toward them.
-    float tg[maxVoices], tp[maxVoices];
+    // Crowd and codec targets for this block.
+    float tg[maxVoices], tp[maxVoices], te[maxVoices];
     computeCrowd (b, countParam->load() * (float) n, tg, tp);
+    const bool codecOn = codecParam->load() > 0.5f;
+    for (int s = 0; s < n; ++s) te[s] = (codecOn && s == b.primary) ? 1.0f : 0.0f;
 
-    const float gStep = (float) (numSamples / (gainGlideSec * hostRate));
-    const float pStep = (float) (2.0 * numSamples / (panGlideSec * hostRate));
-    float gl0[maxVoices], gr0[maxVoices], gl1[maxVoices], gr1[maxVoices];
+    const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
     for (int s = 0; s < n; ++s)
-    {
-        auto& st = *b.stems[(size_t) s];
-        float l, r;
-        panGains (st.curPan, l, r);
-        gl0[s] = st.curGain * l; gr0[s] = st.curGain * r;
-        st.curGain = approach (st.curGain, tg[s], gStep);
-        st.curPan = approach (st.curPan, tp[s], pStep);
-        panGains (st.curPan, l, r);
-        gl1[s] = st.curGain * l; gr1[s] = st.curGain * r;
-        voiceLevel[s] = st.curGain;
-    }
-    for (int s = n; s < maxVoices; ++s) voiceLevel[s] = 0.0f;
+        voiceDsp[s].codec.setParams (bitRateParam->load(), frameDropParam->load(), lock,
+                                     b.stems[(size_t) s]->analysis.pitchHz);
 
-    // Sample-accurate triggers: render up to each note-on, then (re)trigger.
-    int cursor = 0;
-    for (const auto meta : midi)
+    auto* outL = buffer.getWritePointer (0);
+    auto* outR = buffer.getWritePointer (1);
+    auto midiIt = midi.cbegin();
+
+    for (int chunkStart = 0; chunkStart < numSamples; chunkStart += chunkSize)
     {
-        if (! meta.getMessage().isNoteOn()) continue;   // pitch, velocity, note-off ignored
-        const int pos = juce::jlimit (0, numSamples, meta.samplePosition);
-        if (pos > cursor) renderChunk (buffer, cursor, pos - cursor, b, gl0, gr0, gl1, gr1, numSamples, cursor);
-        cursor = pos;
-        startInstance();
+        const int num = juce::jmin (chunkSize, numSamples - chunkStart);
+
+        // Dry voices, with sample-accurate triggers inside this chunk.
+        dryBuf.clear (0, num);
+        int cursor = 0;
+        for (; midiIt != midi.cend(); ++midiIt)
+        {
+            const auto meta = *midiIt;
+            const int pos = meta.samplePosition - chunkStart;
+            if (pos >= num) break;
+            if (! meta.getMessage().isNoteOn()) continue;   // pitch, velocity, note-off ignored
+            const int at = juce::jlimit (0, num, pos);
+            if (at > cursor) renderDry (cursor, at - cursor, b);
+            cursor = at;
+            startInstance();
+        }
+        if (cursor < num) renderDry (cursor, num - cursor, b);
+
+        // Glide each voice toward its targets over this chunk.
+        const float gStep = (float) (num / (gainGlideSec * hostRate));
+        const float pStep = (float) (2.0 * num / (panGlideSec * hostRate));
+        const float eStep = (float) (num / (encodeGlideSec * hostRate));
+        const float invNum = 1.0f / (float) num;
+
+        for (int s = 0; s < n; ++s)
+        {
+            auto& st = *b.stems[(size_t) s];
+            auto& vd = voiceDsp[s];
+
+            float l0, r0, l1, r1;
+            panGains (st.curPan, l0, r0);
+            const float g0 = st.curGain, e0 = vd.encode;
+            st.curGain = approach (st.curGain, tg[s], gStep);
+            st.curPan = approach (st.curPan, tp[s], pStep);
+            vd.encode = approach (vd.encode, te[s], eStep);
+            panGains (st.curPan, l1, r1);
+            const float g1 = st.curGain, e1 = vd.encode;
+            l0 *= g0; r0 *= g0; l1 *= g1; r1 *= g1;
+
+            // Codec runs on every voice continuously, so a voice switching to it is already warm.
+            const float* dry = dryBuf.getReadPointer (s);
+            vd.codec.process (dry, codecOut.data(), num);
+
+            const int mask = (int) vd.delay.size() - 1;
+            const bool silent = l0 + r0 + l1 + r1 <= 0.0f;
+            for (int j = 0; j < num; ++j)
+            {
+                vd.delay[(size_t) vd.delayPos] = dry[j];
+                const float delayed = vd.delay[(size_t) ((vd.delayPos - latency) & mask)];
+                vd.delayPos = (vd.delayPos + 1) & mask;
+                if (silent) continue;
+
+                const float a = (float) j * invNum;
+                const float e = e0 + a * (e1 - e0);
+                // Equal-power crossfade dry <-> codec.
+                const float x = delayed * std::cos (e * juce::MathConstants<float>::halfPi)
+                              + codecOut[(size_t) j] * std::sin (e * juce::MathConstants<float>::halfPi);
+                outL[chunkStart + j] += x * (l0 + a * (l1 - l0));
+                outR[chunkStart + j] += x * (r0 + a * (r1 - r0));
+            }
+        }
     }
-    if (cursor < numSamples) renderChunk (buffer, cursor, numSamples - cursor, b, gl0, gr0, gl1, gr1, numSamples, cursor);
+
+    for (int s = 0; s < n; ++s) voiceLevel[s] = b.stems[(size_t) s]->curGain;
+    for (int s = n; s < maxVoices; ++s) voiceLevel[s] = 0.0f;
 
     const auto& in = instances[current];
     const int prim = juce::jlimit (0, n - 1, b.primary);

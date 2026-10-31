@@ -191,19 +191,23 @@ int main()
         auto bank = p.getBank();
         CHECK (bank->primary == 0, "first stem becomes primary");
 
+        const int L = p.getLatencySamples();
+        CHECK (L == LpcCodec::latencySamples (rate) && L > 0, "reports the codec latency to the host");
+
         setCount (p, 1.0f / 3.0f);   // primary only
         run (p, 256, 20, {});        // let the crowd settle
         auto out = run (p, 256, 40, { 300 });
-        CHECK (out.getMagnitude (0, 0, 300) == 0.0f, "silent before the note");
-        CHECK (std::abs (out.getSample (0, 2000) - 0.10f) < 1e-3f && std::abs (out.getSample (1, 2000) - 0.10f) < 1e-3f,
+        CHECK (out.getMagnitude (0, 0, 300 + L) == 0.0f, "silent before the note (+ latency)");
+        CHECK (std::abs (out.getSample (0, 2000 + L) - 0.10f) < 1e-3f && std::abs (out.getSample (1, 2000 + L) - 0.10f) < 1e-3f,
                "Count = 1 voice: only the primary, centred, at unity");
 
         setCount (p, 1.0f);
         run (p, 256, 20, {});
         out = run (p, 256, 40, { 300 });
-        const float l = out.getSample (0, 2000), r = out.getSample (1, 2000);
+        const float l = out.getSample (0, 2000 + L), r = out.getSample (1, 2000 + L);
         CHECK (l > 0.10f && r > 0.10f && std::abs (l - r) > 1e-3f, "full Count: whole crowd, spread across the stereo field");
-        CHECK (out.getSample (0, 300) == 0.0f && out.getSample (0, 302) > 0.0f, "every voice starts on the note's sample");
+        CHECK (out.getSample (0, 300 + L) == 0.0f && out.getSample (0, 302 + L) > 0.0f,
+               "every voice starts exactly one latency after the note (host compensates)");
         CHECK (maxJump (out) < 0.03f, "no clicks with the crowd playing");
 
         // Turn Count down mid-phrase: glides, never steps.
@@ -234,6 +238,135 @@ int main()
         p.removeStem (0);
         CHECK (p.getBank()->size() == 2 && p.getBank()->stems[(size_t) p.getBank()->primary]->file == fC,
                "removing a voice keeps the primary");
+    }
+
+
+    std::printf ("codec (unit)\n");
+    {
+        const int n = (int) rate * 3;
+        std::vector<float> x ((size_t) n), y ((size_t) n);
+        auto tone = voiceTone (150.0f, 0.3f, rate, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / rate, syl = std::fmod (t, 0.27);
+            const float env = (t > 0.2 && syl < 0.18) ? (float) std::sin (juce::MathConstants<double>::pi * syl / 0.18) : 0.0f;
+            x[(size_t) i] = tone.getSample (0, i) * env;
+        }
+        auto envOf = [] (const std::vector<float>& v)
+        {
+            std::vector<float> e; float s = 0.0f; const float a = std::exp (-1.0f / (0.004f * 48000.0f));
+            for (size_t i = 0; i < v.size(); ++i) { s = a * s + (1 - a) * std::abs (v[i]); if (i % 48 == 0) e.push_back (s); }
+            return e;
+        };
+        const auto ex = envOf (x);
+        double px = 0; for (auto v : x) px += v * v;
+
+        bool allFinite = true, allBounded = true, levelOk = true, alignOk = true;
+        for (int lock = 0; lock < 3; ++lock)
+            for (float br : { 0.0f, 0.35f, 0.7f, 1.0f })
+            {
+                LpcCodec c; c.prepare (rate, 1); c.setParams (br, 0.0f, (LpcCodec::PitchLock) lock, 100.0f);
+                c.process (x.data(), y.data(), n);
+                double py = 0; for (auto v : y) { py += v * v; allFinite &= std::isfinite (v); allBounded &= std::abs (v) < 2.0f; }
+                const double db = 10.0 * std::log10 (py / px);
+                if (std::abs (db) >= 3.0) std::printf ("       lock %d bit rate %.2f: level %+.1f dB\n", lock, br, db);
+                levelOk &= std::abs (db) < 3.0;
+                if (br < 0.5f)
+                {
+                    const auto ey = envOf (y);
+                    const int expected = juce::roundToInt (LpcCodec::latencySamples (rate) / 48.0);
+                    int bestLag = 0; double best = -1;
+                    for (int lag = 0; lag < 100; ++lag)
+                    {
+                        double acc = 0; for (size_t i = 0; i + (size_t) lag < ey.size(); ++i) acc += ex[i] * ey[i + (size_t) lag];
+                        if (acc > best) { best = acc; bestLag = lag; }
+                    }
+                    alignOk &= std::abs (bestLag - expected) <= 3;
+                }
+            }
+        CHECK (allFinite && allBounded, "every lock mode and bit rate: finite, bounded output");
+        CHECK (levelOk, "level within 3 dB of the input at every bit rate");
+        CHECK (alignOk, "codec output lines up with the latency-delayed dry path (within 3 ms)");
+
+        auto pitchOf = [&] (LpcCodec::PitchLock lock, float fixedHz)
+        {
+            LpcCodec c; c.prepare (rate, 1); c.setParams (0.2f, 0.0f, lock, fixedHz);
+            c.process (tone.getReadPointer (0), y.data(), n);
+            return analyseStem (y.data() + 9600, n - 9600, rate).pitchHz;
+        };
+        CHECK (std::abs (pitchOf (LpcCodec::PitchLock::tracking, 100.0f) - 150.0f) < 4.0f, "Tracking follows the voice's pitch");
+        CHECK (std::abs (pitchOf (LpcCodec::PitchLock::fixed, 100.0f) - 100.0f) < 3.0f, "Fixed holds the set pitch");
+
+        // Frame drop: gaps appear, and only when asked for.
+        auto silentFrames = [&] (float drop)
+        {
+            LpcCodec c; c.prepare (rate, 1); c.setParams (0.2f, drop, LpcCodec::PitchLock::tracking, 100.0f);
+            c.process (tone.getReadPointer (0), y.data(), n);
+            int quiet = 0, total = 0;
+            for (int f = 9600; f + 1080 < n; f += 1080, ++total)
+            {
+                double e = 0; for (int i = 0; i < 1080; ++i) e += y[(size_t) (f + i)] * y[(size_t) (f + i)];
+                if (std::sqrt (e / 1080) < 0.005) ++quiet;
+            }
+            return (float) quiet / (float) total;
+        };
+        CHECK (silentFrames (0.0f) == 0.0f, "no dropouts at frame drop 0");
+        CHECK (silentFrames (1.0f) > 0.08f, "frame drop 100% produces audible dropouts");
+
+        // Silence and noise.
+        // No ringing after the voice stops, even at the coarsest settings.
+        {
+            LpcCodec c; c.prepare (rate, 1); c.setParams (1.0f, 0.0f, LpcCodec::PitchLock::tracking, 100.0f);
+            std::vector<float> burst ((size_t) n, 0.0f);
+            for (int i = 0; i < (int) rate; ++i) burst[(size_t) i] = tone.getSample (0, i);
+            c.process (burst.data(), y.data(), n);
+            float tail = 0; for (int i = (int) rate + 9600; i < n; ++i) tail = juce::jmax (tail, std::abs (y[(size_t) i]));
+            CHECK (tail < 1e-3f, "no ringing after the voice stops (coarsest bit rate)");
+        }
+
+        std::vector<float> z ((size_t) n, 0.0f);
+        LpcCodec c; c.prepare (rate, 1); c.setParams (1.0f, 1.0f, LpcCodec::PitchLock::free, 100.0f);
+        c.process (z.data(), y.data(), n);
+        float mag = 0; for (auto v : y) mag = juce::jmax (mag, std::abs (v));
+        CHECK (mag < 1e-4f, "silence in -> silence out");
+        juce::Random r (3); for (auto& v : z) v = r.nextFloat() * 2.0f - 1.0f;
+        c.process (z.data(), y.data(), n);
+        bool ok = true; for (auto v : y) ok &= std::isfinite (v) && std::abs (v) < 3.0f;
+        CHECK (ok, "full-scale noise at the harshest settings stays finite and bounded");
+    }
+
+    std::printf ("codec in the engine\n");
+    {
+        auto toneFile = writeWav ("tone.wav", voiceTone (150.0f, 0.3f, rate, (int) rate), rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ toneFile.getFullPathName() }, errs);
+        auto dry = run (p, 256, 120, { 0 });
+        p.params.getParameter ("codecTest")->setValueNotifyingHost (1.0f);
+        run (p, 256, 10, {});
+        auto enc = run (p, 256, 120, { 0 });
+        const int a0 = 9600, len2 = 24000;
+        double pd = 0, pe = 0, cross = 0;
+        for (int i = a0; i < a0 + len2; ++i)
+        {
+            pd += dry.getSample (0, i) * dry.getSample (0, i);
+            pe += enc.getSample (0, i) * enc.getSample (0, i);
+            cross += dry.getSample (0, i) * enc.getSample (0, i);
+        }
+        CHECK (std::abs (10.0 * std::log10 (pe / pd)) < 3.0, "codec on primary: level within 3 dB of dry");
+        CHECK (cross / std::sqrt (pd * pe) < 0.9, "codec on primary: audibly different waveform from dry");
+
+        // Flip it on and off mid-phrase: crossfades, no clicks.
+        p.params.getParameter ("codecTest")->setValueNotifyingHost (0.0f);
+        run (p, 256, 10, {});
+        auto sw = run (p, 256, 120, { 0 }, [&] (int blk)
+        {
+            if (blk == 40) p.params.getParameter ("codecTest")->setValueNotifyingHost (1.0f);
+            if (blk == 80) p.params.getParameter ("codecTest")->setValueNotifyingHost (0.0f);
+        });
+        // A click shows up as a step bigger than anything the dry or codec signal makes on its own.
+        const float natural = juce::jmax (maxJump (dry), maxJump (enc));
+        std::printf ("       max step: dry/codec %.4f, while switching %.4f\n", natural, maxJump (sw));
+        CHECK (maxJump (sw) < natural * 1.25f, "switching the codec mid-phrase crossfades without clicks");
     }
 
     std::printf ("milestone 1 sets still open\n");

@@ -125,11 +125,39 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     countAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "count", countKnob);
     countKnob.onValueChange = [this] { repaint(); };
 
+    // Codec strip.
+    codecButton.setClickingTogglesState (true);
+    codecButton.setColour (juce::TextButton::buttonColourId, colours::row);
+    codecButton.setColour (juce::TextButton::buttonOnColourId, colours::accent);
+    codecButton.setColour (juce::TextButton::textColourOffId, colours::dim);
+    codecButton.setColour (juce::TextButton::textColourOnId, colours::bg);
+    codecButton.setTooltip ("Milestone 3 test: run the primary voice through the codec (Encode count replaces this in M4)");
+    addAndMakeVisible (codecButton);
+    codecAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.params, "codecTest", codecButton);
+
+    for (auto* k : { &bitRateKnob, &frameDropKnob })
+    {
+        k->setColour (juce::Slider::rotarySliderFillColourId, colours::accent);
+        k->setColour (juce::Slider::rotarySliderOutlineColourId, colours::row);
+        k->setColour (juce::Slider::thumbColourId, colours::wave);
+        k->onValueChange = [this] { repaint (codecArea()); };
+        addAndMakeVisible (*k);
+    }
+    bitRateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "bitRate", bitRateKnob);
+    frameDropAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.params, "frameDrop", frameDropKnob);
+
+    pitchLockBox.addItemList ({ "Fixed", "Free", "Tracking" }, 1);
+    pitchLockBox.setColour (juce::ComboBox::backgroundColourId, colours::row);
+    pitchLockBox.setColour (juce::ComboBox::outlineColourId, colours::row);
+    pitchLockBox.setColour (juce::ComboBox::textColourId, colours::wave);
+    addAndMakeVisible (pitchLockBox);
+    pitchLockAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.params, "pitchLock", pitchLockBox);
+
     listView.setViewedComponent (&listContent, false);
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (760, 520);
+    setSize (760, 600);
     startTimerHz (30);
 }
 
@@ -201,6 +229,11 @@ juce::Rectangle<int> DrosakaVoiceEditor::waveArea() const
     return { 16, 50, getWidth() - 32 - 150, 96 };
 }
 
+juce::Rectangle<int> DrosakaVoiceEditor::codecArea() const
+{
+    return { 16, waveArea().getBottom() + 40, getWidth() - 32, 66 };
+}
+
 void DrosakaVoiceEditor::resized()
 {
     addButton.setBounds (getWidth() - 16 - 120, 14, 120, 26);
@@ -210,7 +243,13 @@ void DrosakaVoiceEditor::resized()
     auto wa = waveArea();
     countKnob.setBounds (wa.getRight() + 32, wa.getY(), 90, 90);
 
-    listView.setBounds (16, wa.getBottom() + 50, getWidth() - 32, getHeight() - wa.getBottom() - 50 - 30);
+    auto ca = codecArea();
+    codecButton.setBounds (ca.getX() + 10, ca.getCentreY() - 14, 170, 28);
+    bitRateKnob.setBounds (ca.getX() + 210, ca.getY() + 4, 46, 46);
+    frameDropKnob.setBounds (ca.getX() + 350, ca.getY() + 4, 46, 46);
+    pitchLockBox.setBounds (ca.getX() + 490, ca.getCentreY() - 6, 120, 26);
+
+    listView.setBounds (16, ca.getBottom() + 34, getWidth() - 32, getHeight() - ca.getBottom() - 34 - 30);
     const int rowH = 26;
     listContent.setSize (listView.getMaximumVisibleWidth(), juce::jmax (1, (int) rows.size() * rowH));
     for (size_t i = 0; i < rows.size(); ++i)
@@ -267,6 +306,27 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.setColour (colours::dim);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText ("primary: " + prim->file.getFileName(), area.reduced (8, 4), juce::Justification::topLeft);
+    }
+
+    // Codec strip.
+    {
+        auto ca = codecArea();
+        g.setColour (colours::panel);
+        g.fillRoundedRectangle (ca.toFloat(), 6.0f);
+        g.setFont (juce::FontOptions (11.0f));
+        auto label = [&] (juce::Component& c, const juce::String& name, const juce::String& value)
+        {
+            g.setColour (colours::wave);
+            g.drawText (name, c.getRight() + 8, ca.getY() + 12, 90, 14, juce::Justification::centredLeft);
+            g.setColour (colours::dim);
+            g.drawText (value, c.getRight() + 8, ca.getY() + 28, 90, 14, juce::Justification::centredLeft);
+        };
+        label (bitRateKnob, "BIT RATE", bitRateKnob.getValue() < 0.02 ? "clean" : juce::String (juce::roundToInt (bitRateKnob.getValue() * 100)) + "% crushed");
+        label (frameDropKnob, "FRAME DROP", juce::String (juce::roundToInt (frameDropKnob.getValue() * 50)) + "% loss");
+        g.setColour (colours::wave);
+        g.drawText ("PITCH LOCK", pitchLockBox.getX(), ca.getY() + 6, 120, 14, juce::Justification::centredLeft);
+        g.setColour (colours::dim);
+        g.drawText ("8 kHz LPC-10", ca.getRight() - 110, ca.getY() + 6, 100, 14, juce::Justification::centredRight);
     }
 
     // Count readout.

@@ -35,7 +35,8 @@ juce_add_plugin(DrosakaVoice
 target_sources(DrosakaVoice PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
-    Source/Analysis.cpp)
+    Source/Analysis.cpp
+    Source/LpcCodec.cpp)
 
 target_compile_definitions(DrosakaVoice PUBLIC
     JUCE_WEB_BROWSER=0
@@ -53,21 +54,21 @@ target_link_libraries(DrosakaVoice
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
 
-# Offline processor tests:  cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceTests
-option(DV_BUILD_TESTS "Build offline processor tests" OFF)
+# Offline tools:  cmake -B build -DDV_BUILD_TESTS=ON
+#   DrosakaVoiceTests     - processor/codec checks (run after every change)
+#   DrosakaVoiceSnapshot  - renders the editor to a PNG
+#   DrosakaVoiceRender    - renders example audio through the codec
+option(DV_BUILD_TESTS "Build offline test tools" OFF)
 if(DV_BUILD_TESTS)
-    juce_add_console_app(DrosakaVoiceTests PRODUCT_NAME "DrosakaVoiceTests")
-    target_sources(DrosakaVoiceTests PRIVATE tests/ProcessorTests.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Analysis.cpp)
-    target_compile_definitions(DrosakaVoiceTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
-    target_link_libraries(DrosakaVoiceTests PRIVATE
-        juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors juce::juce_dsp
-        juce::juce_recommended_config_flags)
-endif()
-if(DV_BUILD_TESTS)
-    juce_add_console_app(DrosakaVoiceSnapshot PRODUCT_NAME "DrosakaVoiceSnapshot")
-    target_sources(DrosakaVoiceSnapshot PRIVATE tests/Snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/Analysis.cpp)
-    target_compile_definitions(DrosakaVoiceSnapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(DrosakaVoiceSnapshot PRIVATE
-        juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors juce::juce_dsp
-        juce::juce_recommended_config_flags)
+    function(dv_tool name src)
+        juce_add_console_app(${name} PRODUCT_NAME "${name}")
+        target_sources(${name} PRIVATE ${src} Source/PluginProcessor.cpp Source/PluginEditor.cpp
+                       Source/Analysis.cpp Source/LpcCodec.cpp)
+        target_compile_definitions(${name} PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+        target_link_libraries(${name} PRIVATE juce::juce_audio_utils juce::juce_audio_formats
+                              juce::juce_audio_processors juce::juce_dsp juce::juce_recommended_config_flags)
+    endfunction()
+    dv_tool(DrosakaVoiceTests tests/ProcessorTests.cpp)
+    dv_tool(DrosakaVoiceSnapshot tests/Snapshot.cpp)
+    dv_tool(DrosakaVoiceRender tests/Render.cpp)
 endif()
