@@ -68,6 +68,15 @@ public:
     void resetOffset (int stemIndex);                 // back to the auto-aligned position
     void alignAll();                                  // re-run auto-align against the primary
 
+    // Slicing (message thread). Markers are seconds on the phrase timeline.
+    void addSlice (double seconds);
+    void moveSlice (int index, double seconds);       // clamped between its neighbours
+    void removeSlice (int index);
+
+    // Presets: the same state the Live set stores (bank with embedded audio, slices, knobs).
+    bool savePreset (const juce::File&);
+    bool loadPreset (const juce::File&);
+
     Bank::Ptr getBank() const;
     juce::StringArray getMissingPaths() const { const juce::ScopedLock l (pathLock); return missingPaths; }
 
@@ -133,15 +142,18 @@ private:
     struct Instance   // one triggered playback of the whole bank
     {
         bool active = false;
-        double t = 0.0;          // host samples since trigger
+        double t = 0.0;          // position on the phrase timeline, host samples (slices start mid-phrase)
+        double stopT = 1e18;     // where this note's slice ends
+        bool releasing = false;
         float env = 0.0f, envTarget = 0.0f, envStep = 0.0f;
         Psola psola[maxVoices];
     };
 
     Stem::Ptr importStem (const juce::File&, juce::String& error);
+    Stem::Ptr readStem (juce::AudioFormatReader*, const juce::File& displayFile, juce::String& error, bool encodeForEmbedding);
     void swapBank (Bank::Ptr, bool structural = true);
     void autoAlign (Bank& b, int stemIndex);
-    void startInstance();
+    void startInstance (double startT, double stopT);
     // All stems, mono: direct playback into dryBuf, pitch-shifted into shiftBuf where asked.
     void renderDry (int start, int num, Bank& bank, const float* psolaRatio, const bool* wantPsola);
 

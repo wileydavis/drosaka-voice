@@ -12,6 +12,7 @@ namespace colours
     const juce::Colour codec  { 0xff3fc8d0 };   // voices on the codec
     const juce::Colour warn   { 0xffe8a33d };   // couldn't auto-align
     const juce::Colour pitch  { 0xffb58cff };   // Spread
+    const juce::Colour slice  { 0xffe8c547 };   // slice markers
 }
 
 namespace
@@ -213,9 +214,162 @@ private:
 };
 
 //==============================================================================
+// The phrase, on the aligned timeline, with slice markers.
+//   double-click: add a marker   drag: move it   right-click: delete it
+// Region k plays on key C3 + k; any other key plays the whole phrase.
+class SliceView : public juce::Component
+{
+public:
+    SliceView (DrosakaVoiceProcessor& p, std::function<Bank::Ptr()> bankGetter) : proc (p), getBank (std::move (bankGetter)) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        auto area = getLocalBounds();
+        g.setColour (colours::panel);
+        g.fillRoundedRectangle (area.toFloat(), 6.0f);
+        auto b = getBank();
+        if (b == nullptr || b->size() == 0 || b->primary < 0)
+        {
+            g.setColour (colours::dim);
+            g.setFont (juce::FontOptions (13.0f));
+            g.drawText ("Drop voice stems anywhere on this window", area, juce::Justification::centred);
+            return;
+        }
+        const double len = b->lengthSeconds();
+        auto xOf = [&] (double t) { return (float) area.getX() + (float) (t / len) * (float) area.getWidth(); };
+
+        // Regions, shaded alternately, labelled with their key.
+        const int regions = b->numRegions();
+        g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+        for (int k = 0; k < regions; ++k)
+        {
+            const double a0 = k == 0 ? 0.0 : b->slices[(size_t) k - 1];
+            const double a1 = k < (int) b->slices.size() ? b->slices[(size_t) k] : len;
+            const auto r = juce::Rectangle<float> (xOf (a0), (float) area.getY(), xOf (a1) - xOf (a0), (float) area.getHeight());
+            if (k % 2 == 1) { g.setColour (colours::slice.withAlpha (0.06f)); g.fillRect (r); }
+            g.setColour (colours::slice);
+            g.drawText (juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + k, true, true, 3), r.reduced (5.0f, 3.0f).toNearestInt(),
+                        juce::Justification::bottomLeft);
+        }
+
+        // The primary's waveform, at its place on the timeline.
+        const auto& prim = *b->stems[(size_t) b->primary];
+        const double off = b->flags[(size_t) b->primary].offsetSec;
+        const double dur = prim.audio.getNumSamples() / prim.sampleRate;
+        const int bins = (int) prim.peaks.size() / 2;
+        const float midY = (float) area.getCentreY(), halfH = (float) area.getHeight() * 0.42f;
+        g.setColour (colours::wave);
+        for (int x = 0; x < area.getWidth(); ++x)
+        {
+            const double t = len * x / area.getWidth() - off;
+            if (t < 0.0 || t >= dur) continue;
+            const int bi = juce::jlimit (0, bins - 1, (int) (t / dur * bins));
+            g.drawVerticalLine (area.getX() + x, midY - prim.peaks[(size_t) bi * 2 + 1] * halfH, midY - prim.peaks[(size_t) bi * 2] * halfH + 1.0f);
+        }
+
+        // Markers.
+        for (size_t i = 0; i < b->slices.size(); ++i)
+        {
+            const float x = xOf (b->slices[i]);
+            g.setColour ((int) i == dragging ? colours::wave : colours::slice);
+            g.fillRect (x - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight());
+            juce::Path tri;
+            tri.addTriangle (x - 6.0f, (float) area.getY(), x + 6.0f, (float) area.getY(), x, (float) area.getY() + 8.0f);
+            g.fillPath (tri);
+        }
+
+        const float ph = proc.getPlayheadProportion();
+        if (ph >= 0.0f)
+        {
+            g.setColour (colours::accent);
+            g.fillRect ((float) area.getX() + ph * (float) area.getWidth(), (float) area.getY(), 2.0f, (float) area.getHeight());
+        }
+
+        g.setFont (juce::FontOptions (11.0f));
+        g.setColour (colours::dim);
+        g.drawText ("primary: " + prim.file.getFileName(), area.reduced (8, 4), juce::Justification::topLeft);
+        g.drawText (b->slices.empty() ? "double-click to slice"
+                                      : juce::String (regions) + " slices from C3 - other keys play it all - drag / right-click markers",
+                    area.reduced (8, 4), juce::Justification::topRight);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        dragging = markerNear (e.x);
+        if (dragging >= 0 && e.mods.isPopupMenu())
+        {
+            proc.removeSlice (dragging);
+            dragging = -1;
+        }
+        repaint();
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (dragging >= 0) proc.moveSlice (dragging, timeAt (e.x));
+    }
+
+    void mouseUp (const juce::MouseEvent&) override { dragging = -1; repaint(); }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (markerNear (e.x) < 0) proc.addSlice (timeAt (e.x));
+    }
+
+private:
+    double timeAt (int x) const
+    {
+        auto b = getBank();
+        return b == nullptr ? 0.0 : juce::jlimit (0.0, 1.0, (double) x / juce::jmax (1, getWidth())) * b->lengthSeconds();
+    }
+
+    int markerNear (int x) const
+    {
+        auto b = getBank();
+        if (b == nullptr) return -1;
+        const double len = b->lengthSeconds();
+        for (size_t i = 0; i < b->slices.size(); ++i)
+            if (std::abs ((float) (b->slices[i] / len) * (float) getWidth() - (float) x) < 6.0f) return (int) i;
+        return -1;
+    }
+
+    DrosakaVoiceProcessor& proc;
+    std::function<Bank::Ptr()> getBank;
+    int dragging = -1;
+};
+
+//==============================================================================
 DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
+    sliceView = std::make_unique<SliceView> (proc, [this] { return shownBank; });
+    addAndMakeVisible (*sliceView);
+
+    addAndMakeVisible (presetButton);
+    presetButton.onClick = [this]
+    {
+        juce::PopupMenu m;
+        m.addItem (1, "Save preset (bank + audio + slices + knobs)...");
+        m.addItem (2, "Load preset...");
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetButton), [this] (int r)
+        {
+            if (r == 0) return;
+            const bool save = r == 1;
+            chooser = std::make_unique<juce::FileChooser> (save ? "Save drosaka Voice preset" : "Load drosaka Voice preset",
+                                                           juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.dvoice");
+            const int chooserFlags = save ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting)
+                                   : (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles);
+            chooser->launchAsync (chooserFlags, [this, save] (const juce::FileChooser& fc)
+            {
+                auto f = fc.getResult();
+                if (f == juce::File()) return;
+                if (save) { f = f.withFileExtension ("dvoice"); status = proc.savePreset (f) ? juce::String() : "Couldn't save " + f.getFileName(); }
+                else status = proc.loadPreset (f) ? juce::String() : "Couldn't load " + f.getFileName();
+                repaint();
+            });
+        });
+    };
+
     addAndMakeVisible (alignButton);
     alignButton.setTooltip ("Auto-align every stem to the primary again (overwrites manual nudges)");
     alignButton.onClick = [this] { proc.alignAll(); };
@@ -366,6 +520,7 @@ void DrosakaVoiceEditor::timerCallback()
             rebuildRows();
         }
         repaint();
+        sliceView->repaint();
     }
     else if (! timeline.frozen && timelineDirty)
     {
@@ -376,7 +531,7 @@ void DrosakaVoiceEditor::timerCallback()
     if (! juce::exactlyEqual (ph, lastPlayhead))
     {
         lastPlayhead = ph;
-        repaint (waveArea());
+        sliceView->repaint();
     }
     for (auto& r : rows) r->repaint();
     repaint (fieldArea());
@@ -434,6 +589,8 @@ void DrosakaVoiceEditor::resized()
     sortFormant.setBounds (addButton.getX() - 12 - 70, 14, 70, 26);
     sortPitch.setBounds (sortFormant.getX() - 70, 14, 70, 26);
     alignButton.setBounds (sortPitch.getX() - 60 - 90, 14, 90, 26);
+    presetButton.setBounds (alignButton.getX() - 10 - 80, 14, 80, 26);
+    sliceView->setBounds (waveArea());
 
     auto wa = waveArea();
     countKnob.setBounds (wa.getRight() + 32, wa.getY(), 90, 90);
@@ -472,46 +629,12 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
     g.setColour (colours::dim);
     g.drawText ("sort", sortPitch.getX() - 40, 14, 34, 26, juce::Justification::centredRight);
 
-    // Primary waveform + playhead.
-    auto area = waveArea();
-    g.setColour (colours::panel);
-    g.fillRoundedRectangle (area.toFloat(), 6.0f);
     if (dragHover)
     {
         g.setColour (colours::accent);
         g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (2.0f), 6.0f, 2.0f);
     }
-
     const int n = shownBank != nullptr ? shownBank->size() : 0;
-    const Stem* prim = (n > 0 && shownBank->primary >= 0) ? shownBank->stems[(size_t) shownBank->primary].get() : nullptr;
-
-    if (prim == nullptr)
-    {
-        g.setColour (colours::dim);
-        g.setFont (juce::FontOptions (13.0f));
-        g.drawText ("Drop voice stems anywhere on this window", area, juce::Justification::centred);
-    }
-    else
-    {
-        const auto& peaks = prim->peaks;
-        const int bins = (int) peaks.size() / 2;
-        const float midY = (float) area.getCentreY();
-        const float halfH = (float) area.getHeight() * 0.45f;
-        g.setColour (colours::wave);
-        for (int x = 0; x < area.getWidth(); ++x)
-        {
-            const int b = juce::jlimit (0, bins - 1, x * bins / area.getWidth());
-            g.drawVerticalLine (area.getX() + x, midY - peaks[(size_t) b * 2 + 1] * halfH, midY - peaks[(size_t) b * 2] * halfH + 1.0f);
-        }
-        if (lastPlayhead >= 0.0f)
-        {
-            g.setColour (colours::accent);
-            g.fillRect (area.getX() + (int) (lastPlayhead * (float) area.getWidth()), area.getY(), 2, area.getHeight());
-        }
-        g.setColour (colours::dim);
-        g.setFont (juce::FontOptions (12.0f));
-        g.drawText ("primary: " + prim->file.getFileName(), area.reduced (8, 4), juce::Justification::topLeft);
-    }
 
     // Codec strip.
     {
@@ -651,6 +774,10 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
     else
     {
         g.setColour (colours::dim);
-        g.drawText ("any MIDI note plays the whole bank in sync", footer, juce::Justification::centredLeft);
+        const int regions = shownBank != nullptr ? shownBank->numRegions() : 0;
+        g.drawText (regions > 0 ? "C3 to " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + regions - 1, true, true, 3)
+                                    + " play the slices across every voice; any other key plays the whole phrase"
+                                : juce::String ("any MIDI note plays the whole bank in sync; double-click the waveform to slice"),
+                    footer, juce::Justification::centredLeft);
     }
 }

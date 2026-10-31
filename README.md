@@ -29,8 +29,24 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 3 Codec, single voice | ✅ done — tested in Live, sounds good |
 | 4 Encode count | Written and passing offline tests. **Awaiting ear test in Live** |
 | 5 Spread (+ stem alignment) | ✅ done — tested in Live, sounds great |
-| 6 Spatial modes + tempo sync | Written and passing offline tests. **Awaiting ear test in Live** |
-| 7 Slicing + presets w/ embedded audio | not started |
+| 6 Spatial modes + tempo sync | ✅ done — tested in Live, sounds good |
+| 7 Slicing + presets w/ embedded audio | Written and passing offline tests. **Awaiting ear test in Live** |
+
+### Milestone 7 behaviour (as built)
+
+- **Slicing:** on the top waveform, **double-click** to add a marker, **drag** to move one, **right-click** to delete. Each region is labelled with its key, starting at **C3**. Because markers sit on the aligned timeline, one marker cuts every voice, and one key fires that word across the whole crowd. Any key outside the slice range plays the whole phrase
+- **Each slice** starts on its marker and fades out exactly on the next one
+- **The Live set carries the audio:** every stem is saved inside the set, losslessly (24-bit FLAC), with offsets, mute/solo, primary, slices and every knob. The set opens on another machine, or after the source files have moved
+- **Preset** menu: Save or Load a `.dvoice` file holding the same bank with its audio, so a phrase bank can move between sets
+- Older sets that point to files still open, and are saved with the audio embedded from then on
+
+### Milestone 7 test in Live
+
+1. Slice the phrase into words. In a MIDI clip, play C3, C#3, D3… and each word should fire across the whole crowd, in sync
+2. Re-trigger a word on 1/16s ("they they they"): there should be no clicks
+3. Save the set, rename the folder with your stems, reopen the set: everything should still be there and play
+4. Preset, then Save preset; drop a fresh device on another track, then Preset, then Load: the same bank, slices and knobs should come back
+5. Check the set's file size is reasonable with a full 20-voice bank (about 0.5 MB per voice-minute)
 
 ### Milestone 6 behaviour (as built)
 

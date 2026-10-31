@@ -245,7 +245,7 @@ int main()
         auto moved = fB.getSiblingFile ("b_moved.wav");
         fB.moveFileTo (moved);
         DrosakaVoiceProcessor r2; r2.setStateInformation (mb.getData(), (int) mb.getSize());
-        CHECK (r2.getBank()->size() == 2 && r2.getMissingPaths().size() == 1, "moved stem reported missing, rest load");
+        CHECK (r2.getBank()->size() == 3 && r2.getMissingPaths().isEmpty(), "moved stem still loads: its audio is embedded in the set");
         juce::MemoryBlock mb2; r2.getStateInformation (mb2);
         moved.moveFileTo (fB);
         DrosakaVoiceProcessor r3; r3.setStateInformation (mb2.getData(), (int) mb2.getSize());
@@ -817,6 +817,128 @@ int main()
         std::printf ("       max step: radiate %.4f, orbit %.4f, bounce 1/16 %.4f\n", maxJump (still), maxJump (orbitOut), maxJump (bounceOut));
         CHECK (maxJump (orbitOut) < maxJump (still) * 1.3f && maxJump (bounceOut) < maxJump (still) * 1.3f, "moving voices around: no clicks");
         p.setPlayHead (nullptr);
+    }
+
+
+    std::printf ("slicing\n");
+    {
+        auto toneA = voiceTone (140.0f, 0.4f, rate, (int) (rate * 2.0));
+        auto toneB = voiceTone (190.0f, 0.4f, rate, (int) (rate * 2.0));
+        auto fA = writeWav ("sl_a.wav", toneA, rate), fB = writeWav ("sl_b.wav", toneB, rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fA.getFullPathName(), fB.getFullPathName() }, errs);
+        const int L = p.getLatencySamples();
+
+        p.addSlice (1.0); p.addSlice (0.5); p.addSlice (1.5);
+        p.addSlice (1.004);   // too close to an existing marker
+        auto b = p.getBank();
+        CHECK (b->slices == std::vector<double> ({ 0.5, 1.0, 1.5 }) && b->numRegions() == 4, "markers stay sorted; near-duplicates ignored");
+        p.moveSlice (1, 0.2);   // can't cross its left neighbour
+        CHECK (std::abs (p.getBank()->slices[1] - 0.51) < 1e-9, "a dragged marker stops at its neighbour");
+        p.moveSlice (1, 1.0);
+
+        auto play = [&] (int note)
+        {
+            run (p, 256, 500, {});   // let anything ringing finish
+            juce::AudioBuffer<float> out (2, 256 * 450), blk (2, 256);
+            for (int k = 0; k < 450; ++k)
+            {
+                juce::MidiBuffer m;
+                if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+                p.processBlock (blk, m);
+                for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
+            }
+            return out;
+        };
+        auto mag = [] (const juce::AudioBuffer<float>& o, int a, int n2) { return juce::jmax (o.getMagnitude (0, a, n2), o.getMagnitude (1, a, n2)); };
+
+        auto whole = play (40);   // not a slice key: the whole phrase
+        auto s2 = play (61);      // C#3: region 2 = 0.5 .. 1.0 s
+        const int r0 = L + (int) (0.5 * rate), r1 = L + (int) (1.0 * rate);
+        CHECK (mag (whole, L + (int) (1.7 * rate), 2000) > 0.01f, "other keys play the whole phrase");
+        CHECK (mag (s2, L + 200, (int) (0.5 * rate) - 400) > 0.01f, "slice key plays its region straight away");
+        CHECK (mag (s2, L + (int) (0.5 * rate) + 10, (int) (0.4 * rate)) < 1e-4f, "and stops at the region's end marker");
+
+        // Same audio as the phrase at that point (both voices: one marker cut every voice).
+        double num = 0, da = 0, db = 0;
+        for (int i = 2000; i < (int) (0.45 * rate); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float x = s2.getSample (ch, L + i), y = whole.getSample (ch, r0 + i);
+                num += x * y; da += x * x; db += y * y;
+            }
+        std::printf ("       slice vs the same span of the whole phrase: correlation %.4f\n", num / std::sqrt (da * db));
+        CHECK (num / std::sqrt (da * db) > 0.99, "the slice is that span of the phrase, across every voice");
+        (void) r1;
+
+        auto last = play (63);    // D#3: region 4 = 1.5 s .. end
+        CHECK (mag (last, L + 200, (int) (0.4 * rate)) > 0.01f && mag (last, L + (int) (0.6 * rate), 4000) < 1e-4f, "last slice runs to the end of the phrase");
+
+        p.removeSlice (0); p.removeSlice (0); p.removeSlice (0);
+        CHECK (p.getBank()->slices.empty() && p.getBank()->numRegions() == 0, "removing every marker: back to whole-phrase playback");
+    }
+
+    std::printf ("presets with embedded audio\n");
+    {
+        juce::StringArray paths;
+        std::vector<juce::AudioBuffer<float>> originals;
+        for (int i = 0; i < 3; ++i)
+        {
+            originals.push_back (voiceTone (120.0f + 30.0f * (float) i, 0.4f, 44100.0, 44100 * 2));
+            paths.add (writeWav ("emb" + juce::String (i) + ".wav", originals.back(), 44100.0).getFullPathName());
+        }
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems (paths, errs);
+        p.setPrimary (1); p.setMute (2, true); p.setOffset (0, 0.123);
+        p.addSlice (0.7); p.addSlice (1.3);
+        auto set = [&] (DrosakaVoiceProcessor& q, const char* id, float v) { auto* prm = q.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        set (p, "spread", 0.4f); set (p, "spatialMode", 2.0f); set (p, "encodeCount", 0.5f);
+
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        double rawBytes = 0; for (auto& o : originals) rawBytes += o.getNumSamples() * 3.0;
+        std::printf ("       state: %.0f KB for %.0f KB of 24-bit audio\n", mb.getSize() / 1024.0, rawBytes / 1024.0);
+
+        // The source files go away (another machine, a moved folder...).
+        for (auto& path : paths) juce::File (path).moveFileTo (juce::File (path).withFileExtension ("gone"));
+
+        DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256);
+        q.setStateInformation (mb.getData(), (int) mb.getSize());
+        auto qb = q.getBank();
+        CHECK (qb->size() == 3 && q.getMissingPaths().isEmpty(), "set reopens with every stem though the files are gone");
+        float worst = 0.0f;
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < originals[(size_t) i].getNumSamples(); ++k)
+                worst = juce::jmax (worst, std::abs (qb->stems[(size_t) i]->audio.getSample (0, k) - originals[(size_t) i].getSample (0, k)));
+        std::printf ("       largest sample difference after the round trip: %.2e\n", worst);
+        CHECK (worst < 1e-5f, "embedded audio is lossless (24-bit)");
+        CHECK (qb->stems[1]->sampleRate == 44100.0, "keeps each stem's own sample rate");
+        CHECK (qb->primary == 1 && qb->flags[2].mute && std::abs (qb->flags[0].offsetSec - 0.123) < 1e-9,
+               "primary, mute and alignment offsets come back");
+        CHECK (qb->slices == std::vector<double> ({ 0.7, 1.3 }), "slice markers come back");
+        CHECK (std::abs (q.params.getParameter ("spread")->getValue() - 0.4f) < 1e-4f && (int) q.params.getRawParameterValue ("spatialMode")->load() == 2,
+               "knob states come back");
+        CHECK (std::abs (qb->stems[0]->analysis.pitchHz - 120.0f) < 3.0f && ! qb->stems[0]->marks.pos.empty(), "analysis rebuilt from the embedded audio");
+
+        auto presetFile = tmp.getChildFile ("bank.dvoice");
+        CHECK (q.savePreset (presetFile) && presetFile.getSize() > 1000, "Save preset writes a file");
+        DrosakaVoiceProcessor r; r.prepareToPlay (rate, 256);
+        CHECK (r.loadPreset (presetFile) && r.getBank()->size() == 3 && r.getBank()->slices.size() == 2, "Load preset brings the whole bank back");
+        auto out = run (r, 256, 100, { 0 });
+        CHECK (out.getMagnitude (0, out.getNumSamples()) > 0.01f, "a loaded preset plays");
+
+        // A milestone 2-6 set (XML, file paths) still opens.
+        for (auto& path : paths) juce::File (path).withFileExtension ("gone").moveFileTo (juce::File (path));
+        juce::ValueTree old ("DrosakaVoice");
+        old.setProperty ("version", 3, nullptr);
+        juce::ValueTree bt ("Bank");
+        bt.setProperty ("primary", paths[2], nullptr);
+        for (auto& path : paths) { juce::ValueTree v ("Stem"); v.setProperty ("path", path, nullptr); bt.appendChild (v, nullptr); }
+        old.appendChild (bt, nullptr);
+        juce::MemoryBlock omb; juce::AudioProcessor::copyXmlToBinary (*old.createXml(), omb);
+        DrosakaVoiceProcessor o; o.setStateInformation (omb.getData(), (int) omb.getSize());
+        CHECK (o.getBank()->size() == 3 && o.getBank()->primary == 2, "older sets (file paths) still open");
+        juce::MemoryBlock resaved; o.getStateInformation (resaved);
+        CHECK (resaved.getSize() > 50000, "and are saved with their audio embedded from then on");
     }
 
     std::printf ("milestone 1 sets still open\n");

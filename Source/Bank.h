@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 #include <vector>
+#include <algorithm>
 #include "Analysis.h"
 #include "Align.h"
 
@@ -24,6 +25,7 @@ struct Stem : public juce::ReferenceCountedObject
     StemAnalysis analysis;
     std::vector<float> alignEnv;      // syllable-rhythm envelope for auto-alignment
     PitchMarks marks;                 // for PSOLA pitch shifting (Spread)
+    juce::MemoryBlock flac;           // the audio, losslessly compressed, for embedding in the set
 
     float curGain = 0.0f;             // audio thread only
     float curPan = 0.0f;              // audio thread only
@@ -51,8 +53,32 @@ struct Bank : public juce::ReferenceCountedObject
     SortAxis axis = SortAxis::pitch;
     std::vector<int> sorted;          // stem indices, low -> high on 'axis'
     std::vector<int> encodeOrder;     // stem indices in the order the codec takes them; primary last
+    std::vector<double> slices;       // slice markers, seconds on the phrase timeline (sorted)
 
     int size() const { return (int) stems.size(); }
+
+    // Length of the phrase timeline (seconds): the latest end of any stem, with alignment.
+    double lengthSeconds() const
+    {
+        double longest = 0.0;
+        for (size_t i = 0; i < stems.size(); ++i)
+            longest = std::max (longest, stems[i]->audio.getNumSamples() / stems[i]->sampleRate + std::max (0.0, flags[i].offsetSec));
+        return longest;
+    }
+
+    // Slicing: markers split the phrase into regions; region k plays on note sliceRoot + k.
+    // Any other note plays the whole phrase.
+    static constexpr int sliceRoot = 60;   // C3 in Live's naming
+    int numRegions() const { return slices.empty() ? 0 : (int) slices.size() + 1; }
+    void region (int note, double& startSec, double& endSec) const
+    {
+        startSec = 0.0;
+        endSec = lengthSeconds();
+        const int k = note - sliceRoot;
+        if (slices.empty() || k < 0 || k >= numRegions()) return;
+        if (k > 0) startSec = slices[(size_t) k - 1];
+        if (k < (int) slices.size()) endSec = slices[(size_t) k];
+    }
 
     void resort()
     {
@@ -110,6 +136,7 @@ struct Bank : public juce::ReferenceCountedObject
         Ptr b = new Bank();
         b->stems = stems; b->flags = flags; b->primary = primary; b->axis = axis; b->sorted = sorted;
         b->encodeOrder = encodeOrder;
+        b->slices = slices;
         return b;
     }
 };

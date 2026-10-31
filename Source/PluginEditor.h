@@ -4,6 +4,7 @@
 #include "PluginProcessor.h"
 
 class VoiceRow;
+class SliceView;
 
 // Shared time axis for the alignment lanes (seconds). Frozen while a lane is dragged.
 struct Timeline { double start = 0.0, end = 1.0; bool frozen = false; };
@@ -35,6 +36,8 @@ private:
 
     juce::TextButton addButton { "Add stems..." };
     juce::TextButton alignButton { "Align all" };
+    juce::TextButton presetButton { "Preset" };
+    std::unique_ptr<SliceView> sliceView;
     Timeline timeline;
     bool timelineDirty = false;
     int seenStructure = -1;

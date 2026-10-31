@@ -138,9 +138,11 @@ void LpcCodec::process (const float* in, float* out, int n)
         float z = 0.0f;
         {
             const auto& tbl = sincTable();
-            const float ph = (float) upFrac * (float) sincPhases;
-            const int p0 = (int) ph;
-            const float pf = ph - (float) p0;
+            // upFrac is in [0, 1) but can round to exactly 1.0 in float: clamp so we never
+            // read past the table's last phase.
+            const double ph = upFrac * sincPhases;
+            const int p0 = juce::jlimit (0, sincPhases - 1, (int) ph);
+            const float pf = (float) juce::jlimit (0.0, 1.0, ph - p0);
             const float* h0 = tbl.data() + (size_t) p0 * sincTaps;
             const float* h1 = h0 + sincTaps;
             for (int t = 0; t < sincTaps; ++t)

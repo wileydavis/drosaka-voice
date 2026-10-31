@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <limits>
+#include <cstring>
 
 namespace
 {
@@ -125,10 +126,28 @@ bool DrosakaVoiceProcessor::isSupportedAudioFile (const juce::String& path)
 Stem::Ptr DrosakaVoiceProcessor::importStem (const juce::File& file, juce::String& error)
 {
     std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
-    if (reader == nullptr)                         { error = "Can't read " + file.getFileName(); return nullptr; }
-    if (reader->lengthInSamples <= 1 || reader->sampleRate <= 0) { error = file.getFileName() + " is empty"; return nullptr; }
+    return readStem (reader.get(), file, error, true);
+}
+
+// Embedded audio: 24-bit FLAC (lossless), encoded once per stem.
+static juce::MemoryBlock encodeFlac (const juce::AudioBuffer<float>& mono, double rate)
+{
+    juce::MemoryBlock block;
+    {
+        juce::FlacAudioFormat flac;
+        std::unique_ptr<juce::AudioFormatWriter> w (flac.createWriterFor (new juce::MemoryOutputStream (block, false), rate, 1, 24, {}, 5));
+        if (w != nullptr) w->writeFromAudioSampleBuffer (mono, 0, mono.getNumSamples());
+    }   // the writer finishes the stream when it's destroyed, so leave this scope first
+    return block;
+}
+
+Stem::Ptr DrosakaVoiceProcessor::readStem (juce::AudioFormatReader* reader, const juce::File& file, juce::String& error, bool encode)
+{
+    const auto name = file.getFileName();
+    if (reader == nullptr)                         { error = "Can't read " + name; return nullptr; }
+    if (reader->lengthInSamples <= 1 || reader->sampleRate <= 0) { error = name + " is empty"; return nullptr; }
     if (reader->lengthInSamples > (juce::int64) (maxStemSeconds * reader->sampleRate))
-                                                   { error = file.getFileName() + " is longer than 2 minutes"; return nullptr; }
+                                                   { error = name + " is longer than 2 minutes"; return nullptr; }
 
     const int len = (int) reader->lengthInSamples;
     const int numCh = (int) reader->numChannels;
@@ -155,6 +174,7 @@ Stem::Ptr DrosakaVoiceProcessor::importStem (const juce::File& file, juce::Strin
     s->analysis = analyseStem (s->audio.getReadPointer (0), len, s->sampleRate);
     s->alignEnv = align::envelope (s->audio.getReadPointer (0), len, s->sampleRate);
     s->marks = findPitchMarks (s->audio.getReadPointer (0), len, s->sampleRate);
+    if (encode) s->flac = encodeFlac (s->audio, s->sampleRate);
     return s;
 }
 
@@ -294,6 +314,36 @@ void DrosakaVoiceProcessor::resetOffset (int idx)
     swapBank (b, false);
 }
 
+void DrosakaVoiceProcessor::addSlice (double sec)
+{
+    auto b = getBank()->clone();
+    const double len = b->lengthSeconds();
+    if (sec <= 0.005 || sec >= len - 0.005) return;
+    for (auto m : b->slices) if (std::abs (m - sec) < 0.01) return;   // too close to an existing marker
+    b->slices.push_back (sec);
+    std::sort (b->slices.begin(), b->slices.end());
+    swapBank (b, false);
+}
+
+void DrosakaVoiceProcessor::moveSlice (int i, double sec)
+{
+    auto b = getBank()->clone();
+    if (i < 0 || i >= (int) b->slices.size()) return;
+    const double lo = (i > 0 ? b->slices[(size_t) i - 1] : 0.0) + 0.01;
+    const double hi = (i + 1 < (int) b->slices.size() ? b->slices[(size_t) i + 1] : b->lengthSeconds()) - 0.01;
+    if (hi <= lo) return;
+    b->slices[(size_t) i] = juce::jlimit (lo, hi, sec);
+    swapBank (b, false);
+}
+
+void DrosakaVoiceProcessor::removeSlice (int i)
+{
+    auto b = getBank()->clone();
+    if (i < 0 || i >= (int) b->slices.size()) return;
+    b->slices.erase (b->slices.begin() + i);
+    swapBank (b, false);
+}
+
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
 {
     auto b = getBank()->clone();
@@ -303,22 +353,24 @@ void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
 }
 
 //==============================================================================
-void DrosakaVoiceProcessor::startInstance()
+void DrosakaVoiceProcessor::startInstance (double startT, double stopT)
 {
     auto& prev = instances[current];
     if (prev.active)
     {
         prev.envTarget = 0.0f;
-        prev.envStep = -prev.env / (float) fadeSamples;
+        prev.envStep = -juce::jmax (prev.env, 1e-3f) / (float) fadeSamples;
     }
     current ^= 1;
     auto& in = instances[current];
     in.active = true;
-    in.t = 0.0;
+    in.t = startT;
+    in.stopT = stopT;
+    in.releasing = false;
     in.env = 0.0f;
     in.envTarget = 1.0f;
     in.envStep = 1.0f / (float) fadeSamples;
-    for (auto& p : in.psola) p = {};
+    for (auto& p : in.psola) { p = {}; p.nextSynth = startT; }
 }
 
 void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float* psolaRatio, const bool* wantPsola)
@@ -342,6 +394,13 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
         // The instance envelope for this segment, shared by every voice.
         for (int j = 0; j < num; ++j)
         {
+            // A slice ends with the same short fade, finishing exactly on its end marker.
+            if (! in.releasing && in.t + j >= in.stopT - fadeSamples)
+            {
+                in.releasing = true;
+                in.envTarget = 0.0f;
+                in.envStep = -juce::jmax (in.env, 1e-3f) / (float) fadeSamples;
+            }
             envBuf[j] = in.env;
             if (! juce::exactlyEqual (in.envStep, 0.0f))
             {
@@ -575,7 +634,9 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             const int at = juce::jlimit (0, num, pos);
             if (at > cursor) renderDry (cursor, at - cursor, b, psolaRatio, wantPsola);
             cursor = at;
-            startInstance();
+            double a, z;
+            b.region (meta.getMessage().getNoteNumber(), a, z);   // a slice key, or the whole phrase
+            startInstance (a * hostRate, z * hostRate);
         }
         if (cursor < num) renderDry (cursor, num - cursor, b, psolaRatio, wantPsola);
 
@@ -638,38 +699,45 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     for (int s = n; s < maxVoices; ++s) { voiceLevel[s] = 0.0f; voiceEncode[s] = 0.0f; }
 
     const auto& in = instances[current];
-    const int prim = juce::jlimit (0, n - 1, b.primary);
-    const auto& ps = *b.stems[(size_t) prim];
-    playhead = in.active ? (float) juce::jmin (1.0, in.t * ps.sampleRate / hostRate / ps.audio.getNumSamples()) : -1.0f;
+    const double lenSamples = b.lengthSeconds() * hostRate;
+    playhead = in.active && lenSamples > 0.0 ? (float) juce::jmin (1.0, in.t / lenSamples) : -1.0f;
 }
 
 //==============================================================================
-// State: knob values + the bank as file paths with flags and cached analysis.
-// (Embedded audio in presets is Milestone 7.)
+// State (v4): a binary ValueTree, magic "DVS4", holding the knobs, the bank with each
+// stem's audio embedded as 24-bit FLAC, its flags/offsets, and the slice markers.
+// The Live set and preset files both use it, so a phrase bank travels with them.
+// Older XML states (v1-v3, file paths only) still load.
+namespace { const char stateMagic[4] = { 'D', 'V', 'S', '4' }; }
+
 void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     juce::ValueTree state ("DrosakaVoice");
-    state.setProperty ("version", 3, nullptr);
+    state.setProperty ("version", 4, nullptr);
     state.appendChild (params.copyState(), nullptr);
 
     auto b = getBank();
     juce::ValueTree bankTree ("Bank");
     bankTree.setProperty ("axis", (int) b->axis, nullptr);
-    if (b->primary >= 0 && b->primary < b->size())
-        bankTree.setProperty ("primary", b->stems[(size_t) b->primary]->file.getFullPathName(), nullptr);
+    bankTree.setProperty ("primaryIndex", b->primary, nullptr);
+    juce::StringArray sl;
+    for (auto t : b->slices) sl.add (juce::String (t, 6));
+    bankTree.setProperty ("slices", sl.joinIntoString (","), nullptr);
     for (int i = 0; i < b->size(); ++i)
     {
-        const auto& s = *b->stems[(size_t) i];
+        const auto& st = *b->stems[(size_t) i];
+        const auto& f = b->flags[(size_t) i];
         juce::ValueTree v ("Stem");
-        v.setProperty ("path", s.file.getFullPathName(), nullptr);
-        v.setProperty ("mute", b->flags[(size_t) i].mute, nullptr);
-        v.setProperty ("solo", b->flags[(size_t) i].solo, nullptr);
-        v.setProperty ("offset", b->flags[(size_t) i].offsetSec, nullptr);
-        v.setProperty ("autoOffset", b->flags[(size_t) i].autoOffsetSec, nullptr);
-        v.setProperty ("align", (int) b->flags[(size_t) i].align, nullptr);
+        v.setProperty ("path", st.file.getFullPathName(), nullptr);
+        v.setProperty ("mute", f.mute, nullptr);
+        v.setProperty ("solo", f.solo, nullptr);
+        v.setProperty ("offset", f.offsetSec, nullptr);
+        v.setProperty ("autoOffset", f.autoOffsetSec, nullptr);
+        v.setProperty ("align", (int) f.align, nullptr);
+        if (st.flac.getSize() > 0) v.setProperty ("flac", juce::var (st.flac), nullptr);
         bankTree.appendChild (v, nullptr);
     }
-    for (auto& missing : getMissingPaths())   // keep them so saving doesn't lose them
+    for (auto& missing : getMissingPaths())   // old sets: keep paths we couldn't find
     {
         juce::ValueTree v ("Stem");
         v.setProperty ("path", missing, nullptr);
@@ -677,33 +745,55 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
     state.appendChild (bankTree, nullptr);
 
-    if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
+    juce::MemoryOutputStream out (dest, false);
+    out.write (stateMagic, 4);
+    state.writeToStream (out);
 }
 
 void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
 {
-    auto xml = getXmlFromBinary (data, size);
-    if (xml == nullptr) return;
-    auto state = juce::ValueTree::fromXml (*xml);
+    juce::ValueTree state;
+    if (size > 4 && std::memcmp (data, stateMagic, 4) == 0)
+        state = juce::ValueTree::readFromData (static_cast<const char*> (data) + 4, (size_t) size - 4);
+    else if (auto xml = getXmlFromBinary (data, size))
+        state = juce::ValueTree::fromXml (*xml);
+    if (! state.isValid()) return;
 
     auto p = state.getChildWithName (params.state.getType());
     if (p.isValid()) params.replaceState (p);
 
     Bank::Ptr b = new Bank();
     juce::StringArray missing;
+    juce::FlacAudioFormat flac;
 
     auto bankTree = state.getChildWithName ("Bank");
     if (bankTree.isValid())
     {
         b->axis = (int) bankTree.getProperty ("axis", 0) == 1 ? SortAxis::formant : SortAxis::pitch;
-        const juce::String primaryPath = bankTree.getProperty ("primary").toString();
+        const juce::String primaryPath = bankTree.getProperty ("primary").toString();   // v2/v3
+        const int primaryIndex = bankTree.getProperty ("primaryIndex", -1);             // v4
+        int stemCount = 0;
         for (auto v : bankTree)
         {
             const juce::String path = v.getProperty ("path").toString();
             juce::String err;
-            Stem::Ptr s = juce::File (path).existsAsFile() ? importStem (juce::File (path), err) : nullptr;
-            if (s == nullptr) { missing.add (path); continue; }
-            if (path == primaryPath) b->primary = (int) b->stems.size();
+            Stem::Ptr s;
+            if (auto* blob = v.getProperty ("flac").getBinaryData(); blob != nullptr && blob->getSize() > 0)
+            {
+                // Embedded audio: no need for the original file.
+                std::unique_ptr<juce::AudioFormatReader> r (flac.createReaderFor (new juce::MemoryInputStream (*blob, false), true));
+                s = readStem (r.get(), juce::File (path), err, false);
+                if (s != nullptr) s->flac = *blob;
+            }
+            else if (juce::File (path).existsAsFile())
+            {
+                s = importStem (juce::File (path), err);
+            }
+            if (s == nullptr) { missing.add (path); ++stemCount; continue; }
+
+            if ((primaryIndex >= 0 && stemCount == primaryIndex) || (primaryIndex < 0 && path == primaryPath))
+                b->primary = (int) b->stems.size();
+            ++stemCount;
             b->stems.push_back (s);
             VoiceFlags fl;
             fl.mute = (bool) v.getProperty ("mute", false);
@@ -713,6 +803,9 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
             b->flags.push_back (fl);
         }
+        for (auto& t : juce::StringArray::fromTokens (bankTree.getProperty ("slices").toString(), ",", ""))
+            if (t.isNotEmpty()) b->slices.push_back (t.getDoubleValue());
+        std::sort (b->slices.begin(), b->slices.end());
     }
     else if (state.hasProperty ("stemPath"))   // Milestone 1 sets
     {
@@ -724,8 +817,24 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     }
 
     b->resort();
+    if (b->primary >= 0 && b->primary < b->size()) b->flags[(size_t) b->primary].align = AlignState::reference;
     { const juce::ScopedLock l (pathLock); missingPaths = missing; }
     swapBank (b);
+}
+
+bool DrosakaVoiceProcessor::savePreset (const juce::File& f)
+{
+    juce::MemoryBlock mb;
+    getStateInformation (mb);
+    return f.replaceWithData (mb.getData(), mb.getSize());
+}
+
+bool DrosakaVoiceProcessor::loadPreset (const juce::File& f)
+{
+    juce::MemoryBlock mb;
+    if (! f.loadFileAsData (mb) || mb.getSize() < 8) return false;
+    setStateInformation (mb.getData(), (int) mb.getSize());
+    return true;
 }
 
 //==============================================================================

@@ -1,3 +1,4 @@
 build/
+build-asan/
 JUCE/
 .DS_Store
