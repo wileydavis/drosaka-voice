@@ -42,6 +42,9 @@ private:
     juce::TextButton addButton { "Add stems..." };
     juce::TextButton alignButton { "Align all" };
     juce::TextButton presetButton { "Preset" };
+    juce::TextButton bankButtons[DrosakaVoiceProcessor::numBanks];   // 1-4: lit = playing, pulsing = waiting for the bar
+    int bankBlink = 0;
+    void updateBankButtons();
     juce::TextButton sortPitch { "Pitch" }, sortFormant { "Formant" };
     std::unique_ptr<SliceView> sliceView;
     std::vector<std::unique_ptr<KnobCell>> cells;   // the 4x4 grid

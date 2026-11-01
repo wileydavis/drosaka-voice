@@ -120,6 +120,7 @@ struct Bank : public juce::ReferenceCountedObject
     std::vector<Stem::Ptr> stems;     // import order
     std::vector<VoiceFlags> flags;    // parallel to stems
     int primary = -1;                 // index into stems
+    int slot = 0;                     // which of the instance's banks this is (edits go back to it)
     SortAxis axis = SortAxis::pitch;
     std::vector<int> sorted;          // stem indices, low -> high on 'axis'
     std::vector<int> encodeOrder;     // stem indices in the order the codec takes them; primary last
@@ -191,7 +192,7 @@ struct Bank : public juce::ReferenceCountedObject
     Ptr clone() const
     {
         Ptr b = new Bank();
-        b->stems = stems; b->flags = flags; b->primary = primary; b->axis = axis; b->sorted = sorted;
+        b->stems = stems; b->flags = flags; b->primary = primary; b->axis = axis; b->sorted = sorted; b->slot = slot;
         b->encodeOrder = encodeOrder;
         return b;
     }

@@ -37,6 +37,21 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
+**Banks** (1–4 in the header, or the **Bank** parameter). One instance holds four phrases. Each bank has its own stems, markers and settings: every knob, menu and switch except BANK, REC and DROP, so Play mode, Latch, Scheme, Tune root and the rest are per bank.
+- **Switching** lands on the next bar line while Live plays, and at once when it's stopped. A pulsing number is waiting for the bar; a lit one is playing; a dim one is empty
+- **Leaving a bank keeps it** exactly as you left it, tweaks included. A bank you open for the first time starts with the settings you had
+- **Your controller follows:** on a switch the plugin tells Live the new values, and Live sends them to a controller mapped with **Live's MIDI Map** (Cmd-M) if that controller's output has *Remote* on in Live's MIDI preferences. The plugin's own right-click MIDI learn can't send anything back, so map with Live for this
+- **Arrangement automation wins** over a bank's recalled value, as on any device
+- **On the switch**, whatever is sounding fades on the line, and a latched pattern carries on from the new phrase's first slice (or stops, if that bank is in Manual)
+- **To fill a bank:** click its number (stopped, it switches at once), then drop stems on the window as usual. The Live set saves every bank with its audio. Sets from earlier builds open into bank 1
+
+### Banks test in Live
+
+1. Fill banks 1 and 2 with different phrases and settings (say Anchor in one, Rotate in the other, different Spread)
+2. Map **Bank** with Live's MIDI Map and turn it while Live plays: the change should land on the next downbeat, and your controller's rings should jump to bank 2's settings
+3. Tweak a knob, go to bank 1 and back: the tweak should still be there
+4. Save the set, reopen it: all banks come back
+
 **The first marker starts the phrase.** Everything before it is dead space and never plays (it's dimmed on the waveform). N markers make N slices: the first marker starts **C3**, the next C#3, and so on, and the last slice runs to the end of the audio. Any other key plays from the first marker to the end. *This moved every slice key down a semitone from earlier builds, so a clip written for C#3 now plays the slice after the one it used to.* With no markers, the whole stem plays.
 
 **Slice markers are automatable, as offsets.** Each marker has a **home** position, set by placing or dragging it on the waveform and saved with the set. Each also has an automatable **offset** parameter named for the key whose slice it starts: *C3 slice offset*, *C#3 slice offset* … *D4 slice offset*.
@@ -97,7 +112,7 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 - **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH), TUNE/DRIFT/ROOT/SCALE, the pattern feel knobs (GATE, SWING, ACCENT, SCREW DROP) and the stereo-field view sit in the Performance panel beside the grid
 - **MIDI learn:** right-click a knob, choose MIDI learn, then turn a controller. The knob shows its CC in the corner. Any channel works, and one CC drives one knob (re-learning moves it). Right-click and choose Forget to remove it. Mappings save with the Live set and presets
 - **VST3 vs AU:** the VST3 is built without JUCE's 2,080 hidden "MIDI CC" parameters, which had pushed it past Live's 64-parameter auto-list limit, so Live only showed the last-touched parameter. All of them now list automatically on a **fresh** instance; an existing instance keeps its old list until you replace it or use Configure. The catch: a VST3 can't receive CCs without those parameters, so in the **VST3**, map knobs with Live's **MIDI Map mode** (Cmd-M, then click the parameter in the device panel). In the **AU**, both Live's MIDI Map and the right-click learn work
-- **Host parameters:** every control (46 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
+- **Host parameters:** every control (47 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
 - **Controller layout:** the grid is laid out to match a 16-encoder controller like the MIDI Fighter Twister one-to-one: learn each knob to the encoder in the same position
 
 ### Pattern schemes (Nov 1 rework)

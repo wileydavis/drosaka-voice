@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include <unordered_map>
 #include "PluginEditor.h"
 #include <limits>
 #include <cstring>
@@ -70,11 +71,26 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     frameDropParam = params.getRawParameterValue ("frameDrop");
     pitchLockParam = params.getRawParameterValue ("pitchLock");
     bank = new Bank();
+    bankParam = params.getRawParameterValue ("bank");
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (prm))
+        {
+            if (rp->paramID == "bank" || rp->paramID == "record" || rp->paramID == "drop") continue;
+            scoped.push_back (rp);
+            scopedRaw.push_back (params.getRawParameterValue (rp->paramID));
+        }
+    for (int k = 0; k < numBanks; ++k)
+    {
+        slotValues[k].reset (new std::atomic<float>[scoped.size()]);
+        for (size_t i = 0; i < scoped.size(); ++i) slotValues[k][i] = 0.0f;
+        if (k > 0) { slots[k] = new Bank(); slots[k]->slot = k; }
+    }
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::createLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "bank", 1 }, "Bank", juce::StringArray { "1", "2", "3", "4" }, 0));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "count", 1 }, "Count",
@@ -190,6 +206,8 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
     for (auto& i : instances) i = {};
     playhead = -1.0f;
 
+    splitMidiA.ensureSize (4096);
+    splitMidiB.ensureSize (4096);
     latency = LpcCodec::latencySamples (sampleRate);
     setLatencySamples (latency);
     const int ringLen = juce::nextPowerOfTwo (latency + chunkSize + 1);
@@ -283,8 +301,11 @@ void DrosakaVoiceProcessor::swapBank (Bank::Ptr b, bool structural)
     Bank::Ptr old;
     {
         const juce::SpinLock::ScopedLockType sl (bankLock);
-        old = bank;
-        bank = b;
+        // An edit goes back to the bank it was made on, even if the bar line switched banks
+        // while it was being made (importing a stem takes a moment).
+        const int k = juce::jlimit (0, numBanks - 1, b->slot);
+        if (k == activeBank.load()) { old = bank; bank = b; }
+        else { old = slots[k]; slots[k] = b; }
     }
     ++bankGeneration;
     // 'old' is released here, on the message thread.
@@ -889,6 +910,74 @@ void DrosakaVoiceProcessor::processFinishedTake()
     ++bankGeneration;
 }
 
+int DrosakaVoiceProcessor::getBankStemCount (int k) const
+{
+    const juce::SpinLock::ScopedLockType sl (bankLock);
+    if (k == activeBank.load()) return bank != nullptr ? bank->size() : 0;
+    return k >= 0 && k < numBanks && slots[k] != nullptr ? slots[k]->size() : 0;
+}
+
+bool DrosakaVoiceProcessor::switchBankNow (int to, double atPpq)
+{
+    const juce::SpinLock::ScopedTryLockType sl (bankLock);
+    if (! sl.isLocked()) return false;   // the bank is being edited this instant: try again next block
+    const int from = activeBank.load();
+    if (to == from) return true;
+
+    // Keep the outgoing bank exactly as it is now: material, markers and every setting.
+    for (size_t i = 0; i < scoped.size(); ++i) slotValues[from][i] = scopedRaw[i]->load();
+    slotHasValues[from] = true;
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) slotBases[from][i] = sliceBase[i].load();
+    // (No object is freed here: each pointer is still held by the other.)
+    slots[from] = bank;
+    bank = slots[to];
+    slots[to] = nullptr;
+    if (bank != nullptr) bank->slot = to;
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) sliceBase[i] = slotBases[to][i].load();
+
+    // Bring in its settings (a bank never played yet carries on with the current ones). The
+    // DSP reads the new values at once; the host hears about them from the message thread.
+    if (slotHasValues[to].load())
+    {
+        for (size_t i = 0; i < scoped.size(); ++i) scopedRaw[i]->store (slotValues[to][i].load());
+        recallPending = to;
+    }
+    activeBank = to;
+
+    // What's sounding fades; a running pattern restarts from the new phrase on this line.
+    for (auto& in : instances)
+        if (in.active) { in.releasing = true; in.envTarget = 0.0f; in.envStep = -juce::jmax (in.env, 1e-3f) / (float) fadeSamples; }
+    if (patternRunning)
+    {
+        int regions = 0;
+        while (regions < SliceSet::maxMarkers && sliceBase[regions].load() > 0.0f) ++regions;
+        int startSlice = 0;
+        for (int note = Bank::sliceRoot; note < Bank::sliceRoot + regions; ++note)
+            if (held[note]) { startSlice = note - Bank::sliceRoot; break; }
+        const double div = pattern::divisionBeats ((int) patternDivParam->load());
+        patternState = {};
+        patternState.start = startSlice;
+        nextStepPpq = std::ceil (atPpq / div - 1e-9) * div;
+        patternState.startPpq = nextStepPpq;
+        lastPatternType = juce::jlimit (0, pattern::numSchemes - 1, (int) schemeParam->load());
+        numPending = 0;
+    }
+    ++structureGeneration;
+    ++bankGeneration;
+    return true;
+}
+
+void DrosakaVoiceProcessor::flushBankRecall()
+{
+    if (recallPending.exchange (-1) < 0) return;
+    for (size_t i = 0; i < scoped.size(); ++i)
+    {
+        auto* rp = scoped[i];
+        const float v = rp->convertTo0to1 (scopedRaw[i]->load());
+        if (std::abs (rp->getValue() - v) > 1e-6f) rp->setValueNotifyingHost (v);
+    }
+}
+
 void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -900,6 +989,51 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         if (meta.getMessage().isController()) handleCc (meta.getMessage());
     const int numSamples = buffer.getNumSamples();
     if (numSamples == 0 || buffer.getNumChannels() < 2) return;
+
+    // A bank change lands on the next bar line (at once when the transport is stopped): the
+    // block is rendered up to the line, the bank switches, and the rest follows.
+    const int target = getBankTarget();
+    int switchAt = -1;
+    double switchPpq = internalPpq;
+    if (target != activeBank.load())
+    {
+        double bpm = lastBpm, ppq = internalPpq;
+        bool playing = false;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+            {
+                if (auto t = pos->getBpm()) bpm = juce::jlimit (20.0, 400.0, *t);
+                playing = pos->getIsPlaying();
+                if (playing) if (auto q = pos->getPpqPosition()) ppq = *q;
+            }
+        switchPpq = ppq;
+        if (! playing || switchOverdue) switchAt = 0;
+        else
+        {
+            const double bar = std::ceil (ppq / 4.0 - 1e-9) * 4.0;
+            const double at = (bar - ppq) * hostRate * 60.0 / bpm;
+            if (at < numSamples) { switchAt = juce::jlimit (0, numSamples - 1, (int) std::ceil (at - 1e-6)); switchPpq = bar; }
+        }
+    }
+    if (switchAt < 0) { renderSegment (buffer, midi, 0); return; }
+
+    if (switchAt > 0)
+    {
+        juce::AudioBuffer<float> before (buffer.getArrayOfWritePointers(), buffer.getNumChannels(), 0, switchAt);
+        splitMidiA.clear();
+        splitMidiA.addEvents (midi, 0, switchAt, 0);
+        renderSegment (before, splitMidiA, 0);
+    }
+    switchOverdue = ! switchBankNow (target, switchPpq);
+    juce::AudioBuffer<float> after (buffer.getArrayOfWritePointers(), buffer.getNumChannels(), switchAt, numSamples - switchAt);
+    splitMidiB.clear();
+    splitMidiB.addEvents (midi, switchAt, numSamples - switchAt, -switchAt);
+    renderSegment (after, splitMidiB, switchAt);
+}
+
+void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, int segmentOffset)
+{
+    const int numSamples = buffer.getNumSamples();
 
     const juce::SpinLock::ScopedTryLockType sl (bankLock);
     if (! sl.isLocked() || bank == nullptr || bank->size() == 0)
@@ -961,7 +1095,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (auto t = pos->getBpm()) bpm = juce::jlimit (20.0, 400.0, *t);
             playing = pos->getIsPlaying();
             if (playing)
-                if (auto q = pos->getPpqPosition()) internalPpq = *q;
+                if (auto q = pos->getPpqPosition()) internalPpq = *q + segmentOffset * bpm / (60.0 * hostRate);
         }
     lastBpm = bpm;
     hostBpm = (float) bpm;
@@ -1282,42 +1416,79 @@ namespace { const char stateMagic[4] = { 'D', 'V', 'S', '4' }; }
 void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     juce::ValueTree state ("DrosakaVoice");
-    state.setProperty ("version", 4, nullptr);
+    state.setProperty ("version", 5, nullptr);
     state.appendChild (params.copyState(), nullptr);
 
-    auto b = getBank();
-    juce::ValueTree bankTree ("Bank");
-    bankTree.setProperty ("axis", (int) b->axis, nullptr);
-    bankTree.setProperty ("primaryIndex", b->primary, nullptr);
-    // (Slice markers are parameters now; they're in the params child above.)
-    for (int i = 0; i < b->size(); ++i)
+    // Each bank's material as a "Bank" tree: stems (audio embedded), flags, primary.
+    auto writeBank = [this] (const Bank& b, bool withMissing)
     {
-        const auto& st = *b->stems[(size_t) i];
-        const auto& f = b->flags[(size_t) i];
-        juce::ValueTree v ("Stem");
-        v.setProperty ("path", st.file.getFullPathName(), nullptr);
-        v.setProperty ("mute", f.mute, nullptr);
-        v.setProperty ("solo", f.solo, nullptr);
-        v.setProperty ("offset", f.offsetSec, nullptr);
-        v.setProperty ("autoOffset", f.autoOffsetSec, nullptr);
-        v.setProperty ("align", (int) f.align, nullptr);
-        if (st.flac.getSize() > 0) v.setProperty ("flac", juce::var (st.flac), nullptr);
-        bankTree.appendChild (v, nullptr);
-    }
-    for (auto& missing : getMissingPaths())   // old sets: keep paths we couldn't find
-    {
-        juce::ValueTree v ("Stem");
-        v.setProperty ("path", missing, nullptr);
-        bankTree.appendChild (v, nullptr);
-    }
-    state.appendChild (bankTree, nullptr);
+        juce::ValueTree bankTree ("Bank");
+        bankTree.setProperty ("axis", (int) b.axis, nullptr);
+        bankTree.setProperty ("primaryIndex", b.primary, nullptr);
+        for (int i = 0; i < b.size(); ++i)
+        {
+            const auto& st = *b.stems[(size_t) i];
+            const auto& f = b.flags[(size_t) i];
+            juce::ValueTree v ("Stem");
+            v.setProperty ("path", st.file.getFullPathName(), nullptr);
+            v.setProperty ("mute", f.mute, nullptr);
+            v.setProperty ("solo", f.solo, nullptr);
+            v.setProperty ("offset", f.offsetSec, nullptr);
+            v.setProperty ("autoOffset", f.autoOffsetSec, nullptr);
+            v.setProperty ("align", (int) f.align, nullptr);
+            if (st.flac.getSize() > 0) v.setProperty ("flac", juce::var (st.flac), nullptr);
+            bankTree.appendChild (v, nullptr);
+        }
+        if (withMissing)
+            for (auto& missing : getMissingPaths())   // old sets: keep paths we couldn't find
+            {
+                juce::ValueTree v ("Stem");
+                v.setProperty ("path", missing, nullptr);
+                bankTree.appendChild (v, nullptr);
+            }
+        return bankTree;
+    };
 
-    // Slice markers' home positions (seconds); their offsets are parameters above.
+    Bank::Ptr mats[numBanks];
+    int active = 0;
+    {
+        const juce::SpinLock::ScopedLockType sl (bankLock);
+        active = activeBank.load();
+        for (int k = 0; k < numBanks; ++k) mats[k] = k == active ? bank : slots[k];
+    }
+
+    // The playing bank, as before (older builds still read this): material, markers' homes;
+    // its settings are the parameters above.
+    state.appendChild (writeBank (*mats[active], true), nullptr);
     {
         juce::StringArray sb;
         for (auto t : currentBases()) sb.add (juce::String (t, 6));
         state.setProperty ("sliceBase", sb.joinIntoString (","), nullptr);
     }
+    state.setProperty ("activeBank", active, nullptr);
+
+    // The other banks: material, markers' homes and the settings they were left with.
+    juce::ValueTree banks ("Banks");
+    for (int k = 0; k < numBanks; ++k)
+    {
+        if (k == active || mats[k] == nullptr) continue;
+        const bool hasValues = slotHasValues[k].load();
+        if (mats[k]->size() == 0 && ! hasValues && slotBases[k][0].load() <= 0.0f) continue;   // never used
+        juce::ValueTree slot ("Slot");
+        slot.setProperty ("index", k, nullptr);
+        slot.appendChild (writeBank (*mats[k], false), nullptr);
+        juce::StringArray sb;
+        for (auto& t : slotBases[k]) { if (t.load() <= 0.0f) break; sb.add (juce::String (t.load(), 6)); }
+        slot.setProperty ("sliceBase", sb.joinIntoString (","), nullptr);
+        if (hasValues)
+        {
+            juce::StringArray vals;
+            for (size_t i = 0; i < scoped.size(); ++i) vals.add (scoped[i]->paramID + "=" + juce::String (slotValues[k][i].load(), 6));
+            slot.setProperty ("values", vals.joinIntoString (","), nullptr);
+        }
+        banks.appendChild (slot, nullptr);
+    }
+    state.appendChild (banks, nullptr);
 
     // MIDI-learned controls, by parameter ID ("cc:id,cc:id").
     juce::StringArray map;
@@ -1374,15 +1545,14 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     }
     ++midiMapGeneration;
 
-    Bank::Ptr b = new Bank();
     juce::StringArray missing;
     juce::FlacAudioFormat flac;
     std::vector<double> legacySlices;
 
-    auto bankTree = state.getChildWithName ("Bank");
-    if (bankTree.isValid())
+    // A "Bank" tree back into material (stems from embedded FLAC, or the files).
+    auto readBank = [&] (const juce::ValueTree& bankTree, Bank& into, std::vector<double>* legacy)
     {
-        b->axis = (int) bankTree.getProperty ("axis", 0) == 1 ? SortAxis::formant : SortAxis::pitch;
+        into.axis = (int) bankTree.getProperty ("axis", 0) == 1 ? SortAxis::formant : SortAxis::pitch;
         const juce::String primaryPath = bankTree.getProperty ("primary").toString();   // v2/v3
         const int primaryIndex = bankTree.getProperty ("primaryIndex", -1);             // v4
         int stemCount = 0;
@@ -1405,20 +1575,32 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             if (s == nullptr) { missing.add (path); ++stemCount; continue; }
 
             if ((primaryIndex >= 0 && stemCount == primaryIndex) || (primaryIndex < 0 && path == primaryPath))
-                b->primary = (int) b->stems.size();
+                into.primary = (int) into.stems.size();
             ++stemCount;
-            b->stems.push_back (s);
+            into.stems.push_back (s);
             VoiceFlags fl;
             fl.mute = (bool) v.getProperty ("mute", false);
             fl.solo = (bool) v.getProperty ("solo", false);
             fl.offsetSec = (double) v.getProperty ("offset", 0.0);
             fl.autoOffsetSec = (double) v.getProperty ("autoOffset", 0.0);
             fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
-            b->flags.push_back (fl);
+            into.flags.push_back (fl);
         }
         // Sets from before markers were parameters: seconds in the bank tree.
-        for (auto& t : juce::StringArray::fromTokens (bankTree.getProperty ("slices").toString(), ",", ""))
-            if (t.isNotEmpty()) legacySlices.push_back (t.getDoubleValue());
+        if (legacy != nullptr)
+            for (auto& t : juce::StringArray::fromTokens (bankTree.getProperty ("slices").toString(), ",", ""))
+                if (t.isNotEmpty()) legacy->push_back (t.getDoubleValue());
+        into.resort();
+        if (into.primary >= 0 && into.primary < into.size()) into.flags[(size_t) into.primary].align = AlignState::reference;
+    };
+
+    const int active = juce::jlimit (0, numBanks - 1, (int) state.getProperty ("activeBank", 0));
+    Bank::Ptr b = new Bank();
+    b->slot = active;
+    auto bankTree = state.getChildWithName ("Bank");
+    if (bankTree.isValid())
+    {
+        readBank (bankTree, *b, &legacySlices);
     }
     else if (state.hasProperty ("stemPath"))   // Milestone 1 sets
     {
@@ -1431,8 +1613,50 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
 
     b->resort();
     if (b->primary >= 0 && b->primary < b->size()) b->flags[(size_t) b->primary].align = AlignState::reference;
+
+    // The other banks (sets from before banks have none: they start empty).
+    Bank::Ptr others[numBanks];
+    std::vector<double> otherBases[numBanks];
+    std::unordered_map<juce::String, float> otherValues[numBanks];
+    bool otherHasValues[numBanks] {};
+    for (int k = 0; k < numBanks; ++k) { others[k] = new Bank(); others[k]->slot = k; }
+    for (auto slot : state.getChildWithName ("Banks"))
+    {
+        const int k = (int) slot.getProperty ("index", -1);
+        if (k < 0 || k >= numBanks || k == active) continue;
+        readBank (slot.getChildWithName ("Bank"), *others[k], nullptr);
+        for (auto& t : juce::StringArray::fromTokens (slot.getProperty ("sliceBase").toString(), ",", ""))
+            if (t.getDoubleValue() > 0.0) otherBases[k].push_back (t.getDoubleValue());
+        if (slot.hasProperty ("values"))
+        {
+            otherHasValues[k] = true;
+            for (auto& kv : juce::StringArray::fromTokens (slot.getProperty ("values").toString(), ",", ""))
+                otherValues[k][kv.upToFirstOccurrenceOf ("=", false, false)] = kv.fromFirstOccurrenceOf ("=", false, false).getFloatValue();
+        }
+    }
     { const juce::ScopedLock l (pathLock); missingPaths = missing; }
+    {
+        Bank::Ptr old[numBanks + 1];   // released after the lock, here on the message thread
+        const juce::SpinLock::ScopedLockType sl (bankLock);
+        activeBank = active;
+        for (int k = 0; k < numBanks; ++k)
+        {
+            old[k] = slots[k];
+            slots[k] = k == active ? nullptr : others[k];
+            std::sort (otherBases[k].begin(), otherBases[k].end());
+            for (int i = 0; i < SliceSet::maxMarkers; ++i)
+                slotBases[k][i] = i < (int) otherBases[k].size() ? (float) otherBases[k][(size_t) i] : 0.0f;
+            slotHasValues[k] = otherHasValues[k];
+            for (size_t i = 0; i < scoped.size(); ++i)
+            {
+                // A setting the bank didn't store (a newer parameter) starts at its default.
+                const auto it = otherValues[k].find (scoped[i]->paramID);
+                slotValues[k][i] = it != otherValues[k].end() ? it->second : scoped[i]->convertFrom0to1 (scoped[i]->getDefaultValue());
+            }
+        }
+    }
     swapBank (b);
+    if (auto* bp = params.getParameter ("bank")) bp->setValueNotifyingHost (bp->convertTo0to1 ((float) active));
 
     // Slice markers: home positions, or older formats converted (always sorted, so each
     // offset parameter lines up with the marker it's named for).

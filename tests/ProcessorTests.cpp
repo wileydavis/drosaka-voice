@@ -1760,6 +1760,134 @@ int main()
         CHECK (q.getRecordMessage().contains ("isn't sending"), "with no input at all, it says Live isn't sending audio (not just 'silent')");
     }
 
+    std::printf ("banks\n");
+    {
+        auto fA = writeWav ("bk_a.wav", voiceTone (140.0f, 0.4f, rate, (int) (rate * 2.0)), rate);
+        auto fB = writeWav ("bk_b.wav", voiceTone (220.0f, 0.4f, rate, (int) (rate * 1.2)), rate);
+        auto fC = writeWav ("bk_c.wav", voiceTone (260.0f, 0.4f, rate, (int) (rate * 1.2)), rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        auto get = [&] (const char* id) { return p.params.getRawParameterValue (id)->load(); };
+        auto host = [&] (const char* id) { auto* prm = p.params.getParameter (id); return prm->convertFrom0to1 (prm->getValue()); };
+        juce::StringArray errs;
+        p.addStems ({ fA.getFullPathName() }, errs);
+        p.addSlice (0.3); p.addSlice (1.0);
+        set ("spread", 0.2f); set ("scheme", (float) pattern::anchor); set ("playMode", 1.0f);
+        CHECK (p.getActiveBank() == 0 && p.params.getParameter ("bank") != nullptr, "one instance starts on bank 1");
+
+        // Stopped transport: a bank change happens at once.
+        set ("bank", 1.0f);
+        CHECK (p.getActiveBank() == 0, "nothing changes until the audio runs");
+        run (p, 256, 1, {});
+        CHECK (p.getActiveBank() == 1 && p.getBank()->size() == 0 && p.getSlices().n == 0, "stopped: the switch is immediate, to an empty bank 2");
+        CHECK (std::abs (get ("spread") - 0.2f) < 1e-5f && (int) get ("scheme") == pattern::anchor, "a bank used for the first time carries on with the current settings");
+
+        p.addStems ({ fB.getFullPathName(), fC.getFullPathName() }, errs);
+        p.addSlice (0.5);
+        set ("spread", 0.9f); set ("scheme", (float) pattern::rotate); set ("playMode", 0.0f);
+        CHECK (p.getBank()->size() == 2 && p.getBankStemCount (0) == 1 && p.getBankStemCount (1) == 2, "stems load into the bank that's playing");
+
+        set ("bank", 0.0f); run (p, 256, 1, {});
+        p.flushBankRecall();
+        CHECK (p.getActiveBank() == 0 && p.getBank()->size() == 1 && near (sliceTimes (p), { 0.3, 1.0 }), "back to bank 1: its stems and markers");
+        CHECK (std::abs (get ("spread") - 0.2f) < 1e-5f && (int) get ("scheme") == pattern::anchor && get ("playMode") > 0.5f,
+               "and its settings, Play mode included");
+        CHECK (std::abs (host ("spread") - 0.2f) < 1e-4f && (int) std::lround (host ("scheme")) == pattern::anchor, "the host is told (so Live updates your controller)");
+
+        set ("spread", 0.33f);   // a tweak, then away and back: it's kept
+        set ("bank", 1.0f); run (p, 256, 1, {}); p.flushBankRecall();
+        CHECK (std::abs (get ("spread") - 0.9f) < 1e-5f && (int) get ("scheme") == pattern::rotate && get ("playMode") < 0.5f && near (sliceTimes (p), { 0.5 }),
+               "bank 2 comes back as it was left");
+        set ("bank", 0.0f); run (p, 256, 1, {}); p.flushBankRecall();
+        CHECK (std::abs (get ("spread") - 0.33f) < 1e-5f, "tweaks are kept when you leave a bank and come back");
+
+        set ("drop", 1.0f); set ("bank", 1.0f); run (p, 256, 1, {}); p.flushBankRecall();
+        CHECK (get ("drop") > 0.5f, "DROP is global: switching banks doesn't lift it");
+        set ("drop", 0.0f);
+
+        // Playing: the switch waits for the bar line, then lands exactly on it.
+        TestPlayHead ph; ph.bpm = 120.0; ph.ppq = 0.5; p.setPlayHead (&ph);
+        set ("bank", 0.0f); set ("playMode", 0.0f);   // (bank 2 plays by hand)
+        const double spb = rate * 60.0 / ph.bpm;
+        const int L = p.getLatencySamples();
+        juce::AudioBuffer<float> blk (2, 256);
+        int switchedBlock = -1;
+        for (int k = 0; k < 700; ++k)
+        {
+            juce::MidiBuffer m;
+            p.processBlock (blk, m);
+            if (switchedBlock < 0 && p.getActiveBank() == 0) switchedBlock = k;
+            ph.ppq += 256.0 / spb;
+        }
+        const int barSample = (int) std::round ((4.0 - 0.5) * spb);   // beat 4.0, from 0.5
+        std::printf ("       switch requested at beat 0.5, landed in block %d (the bar is in block %d)\n", switchedBlock, barSample / 256);
+        CHECK (switchedBlock == barSample / 256, "playing: the switch waits for the next bar");
+        p.setPlayHead (nullptr);
+
+        // A phrase sounding across the line: bank 2's sound stops right at the bar.
+        set ("bank", 1.0f); run (p, 256, 2, {});
+        set ("playMode", 0.0f);
+        TestPlayHead ph2; ph2.bpm = 120.0; ph2.ppq = 3.0; p.setPlayHead (&ph2);   // bank 2's 1.2 s phrase from beat 3 runs past beat 4
+        set ("bank", 0.0f);
+        juce::AudioBuffer<float> o2 (2, 256 * 300);
+        for (int k = 0; k < 300; ++k)
+        {
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 30, (juce::uint8) 100), 0);
+            p.processBlock (blk, m); ph2.ppq += 256.0 / spb;
+            for (int ch = 0; ch < 2; ++ch) o2.copyFrom (ch, k * 256, blk, ch, 0, 256);
+        }
+        const int line = (int) std::round (1.0 * spb) + L;   // beat 4, heard after the latency
+        const float before = juce::jmax (o2.getMagnitude (0, line - 2400, 2000), o2.getMagnitude (1, line - 2400, 2000));
+        const float after = juce::jmax (o2.getMagnitude (0, line + 400, 2000), o2.getMagnitude (1, line + 400, 2000));
+        std::printf ("       bank 2's phrase across the line: before %.3f, just after %.5f\n", before, after);
+        CHECK (before > 0.02f && after < 1e-3f, "the old bank's sound fades out exactly at the bar line");
+        p.setPlayHead (nullptr);
+
+        // Save and reload: every bank, its markers and its settings.
+        set ("spread", 0.77f);   // bank 1 is playing now
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256);
+        q.setStateInformation (mb.getData(), (int) mb.getSize());
+        auto getq = [&] (const char* id) { return q.params.getRawParameterValue (id)->load(); };
+        CHECK (q.getActiveBank() == 0 && q.getBank()->size() == 1 && q.getBankStemCount (1) == 2 && std::abs (getq ("spread") - 0.77f) < 1e-4f,
+               "a saved set brings back every bank, playing the one it was on");
+        auto setq = [&] (const char* id, float v) { auto* prm = q.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        setq ("bank", 1.0f); run (q, 256, 1, {}); q.flushBankRecall();
+        CHECK (q.getBank()->size() == 2 && near (sliceTimes (q), { 0.5 }) && std::abs (getq ("spread") - 0.9f) < 1e-4f && (int) getq ("scheme") == pattern::rotate,
+               "and the other banks' stems, markers and settings");
+        bool embedded = true; for (auto& st : q.getBank()->stems) embedded &= st->flac.getSize() > 0;
+        CHECK (embedded, "with their audio embedded");
+
+        // A latched pattern carries across: it restarts from the new phrase's first slice on the line.
+        setq ("playMode", 1.0f); setq ("latch", 1.0f);           // bank 2: Pattern, three slices
+        q.addSlice (0.2); q.addSlice (0.8);
+        setq ("bank", 0.0f); run (q, 256, 1, {}); q.flushBankRecall();
+        setq ("playMode", 1.0f); setq ("latch", 1.0f); setq ("scheme", 0.0f); setq ("patternDiv", 1.0f);   // bank 1: Pattern, Phrase, 1/8
+        TestPlayHead ph3; ph3.bpm = 120.0; ph3.ppq = 0.0; q.setPlayHead (&ph3);
+        juce::AudioBuffer<float> b3 (2, 256);
+        auto step = [&] (int blocks, int noteOn = -1, int noteOff = -1)
+        {
+            for (int k = 0; k < blocks; ++k)
+            {
+                juce::MidiBuffer m;
+                if (k == 0 && noteOn >= 0) m.addEvent (juce::MidiMessage::noteOn (1, noteOn, (juce::uint8) 100), 0);
+                if (k == 0 && noteOff >= 0) m.addEvent (juce::MidiMessage::noteOff (1, noteOff), 0);
+                q.processBlock (b3, m); ph3.ppq += 256.0 / spb;
+            }
+        };
+        step (40, 61); step (1, -1, 61);   // C#3: the loop starts on slice 2
+        step (20);
+        const bool walking = q.patternActive.load() && q.patternSlice.load() >= 0;
+        setq ("bank", 1.0f);
+        while (ph3.ppq < 4.0 - 1e-9) step (1);
+        step (12);   // just past the line: the first hit of the new phrase
+        std::printf ("       pattern after the switch: active %d, slice %d (of bank 2's %d)\n", (int) q.patternActive.load(), q.patternSlice.load(), q.getSlices().numRegions());
+        CHECK (walking && q.getActiveBank() == 1 && q.patternActive.load() && q.patternSlice.load() == 0,
+               "a latched pattern keeps going across the switch, from the new phrase's first slice");
+        q.setPlayHead (nullptr);
+
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

@@ -449,6 +449,23 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     sliceView = std::make_unique<SliceView> (proc, [this] { return shownBank; });
     addAndMakeVisible (*sliceView);
 
+    for (int k = 0; k < DrosakaVoiceProcessor::numBanks; ++k)
+    {
+        auto& bb = bankButtons[k];
+        bb.setButtonText (juce::String (k + 1));
+        bb.setTooltip ("Bank " + juce::String (k + 1) + ": its own stems, slices and settings. Switches on the next bar (at once when stopped)");
+        bb.setConnectedEdges ((k > 0 ? juce::Button::ConnectedOnLeft : 0) | (k < DrosakaVoiceProcessor::numBanks - 1 ? juce::Button::ConnectedOnRight : 0));
+        bb.onClick = [this, k]
+        {
+            auto* prm = proc.params.getParameter ("bank");
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost (prm->convertTo0to1 ((float) k));
+            prm->endChangeGesture();
+            updateBankButtons();
+        };
+        addAndMakeVisible (bb);
+    }
+    updateBankButtons();
     addAndMakeVisible (presetButton);
     presetButton.onClick = [this]
     {
@@ -682,6 +699,7 @@ void DrosakaVoiceEditor::timerCallback()
     for (auto& r : rows) r->repaint();
     for (auto& c : cells) c->repaint();   // values that follow the music (Encode of N audible...) and CC badges
     sliceView->repaint();                 // markers can be moved by automation
+    updateBankButtons();
     if (tuneCell != nullptr) tuneCell->repaint();
     if (driftCell != nullptr) driftCell->repaint();
     for (auto& c : feelCells) c->repaint();
@@ -728,6 +746,8 @@ void DrosakaVoiceEditor::resized()
     sortPitch.setBounds (sortFormant.getX() - 70, 14, 70, 26);
     alignButton.setBounds (sortPitch.getX() - 60 - 90, 14, 90, 26);
     presetButton.setBounds (alignButton.getX() - 10 - 80, 14, 80, 26);
+    for (int k = 0; k < DrosakaVoiceProcessor::numBanks; ++k)
+        bankButtons[k].setBounds (196 + k * 30, 14, 30, 26);
     sliceView->setBounds (waveArea());
 
     auto g = gridArea();
@@ -760,6 +780,23 @@ void DrosakaVoiceEditor::resized()
         rows[i]->setBounds (0, (int) i * rowH, listContent.getWidth(), rowH);
 }
 
+void DrosakaVoiceEditor::updateBankButtons()
+{
+    const int active = proc.getActiveBank(), target = proc.getBankTarget();
+    ++bankBlink;
+    for (int k = 0; k < DrosakaVoiceProcessor::numBanks; ++k)
+    {
+        auto& bb = bankButtons[k];
+        const bool playing = k == active, waiting = k == target && target != active;
+        const bool empty = proc.getBankStemCount (k) == 0;
+        const auto bg = playing ? colours::accent
+                      : waiting ? colours::accent.withAlpha ((bankBlink / 8) % 2 == 0 ? 0.55f : 0.2f)
+                                : colours::panel;
+        bb.setColour (juce::TextButton::buttonColourId, bg);
+        bb.setColour (juce::TextButton::textColourOffId, playing ? colours::bg : empty ? colours::dim : colours::wave);
+    }
+}
+
 void DrosakaVoiceEditor::paint (juce::Graphics& g)
 {
     g.fillAll (colours::bg);
@@ -767,6 +804,10 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
     g.setColour (colours::wave);
     g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
     g.drawText ("drosaka voice", 16, 14, 300, 26, juce::Justification::centredLeft);
+    g.setFont (juce::FontOptions (10.5f));
+    g.setColour (colours::dim);
+    g.drawText ("BANK", 150, 14, 42, 26, juce::Justification::centredRight);
+    g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
     g.setFont (juce::FontOptions (12.0f));
     g.setColour (colours::dim);
     g.drawText ("sort", sortPitch.getX() - 40, 14, 34, 26, juce::Justification::centredRight);

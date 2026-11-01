@@ -151,6 +151,16 @@ public:
     std::atomic<int> bankGeneration { 0 };
     std::atomic<int> structureGeneration { 0 };
 
+    // Banks: up to four phrases per instance, each with its own stems, alignment, slice
+    // markers and settings (every parameter but Bank, Record and Drop). The Bank parameter
+    // picks one; the change lands on the next bar line (at once when the transport is
+    // stopped). Leaving a bank keeps it as you left it.
+    static constexpr int numBanks = 4;
+    int getActiveBank() const { return activeBank.load(); }
+    int getBankTarget() const { return juce::jlimit (0, numBanks - 1, (int) bankParam->load()); }
+    int getBankStemCount (int k) const;
+    void flushBankRecall();   // message thread: tell the host (and so your controller) about recalled settings
+
 private:
     static constexpr int chunkSize = 512;   // processing sub-block
 
@@ -288,7 +298,23 @@ private:
     std::atomic<int> ccToParam[128];
     std::atomic<int> learnParam { -1 };
     std::atomic<float> pendingCc[128];        // latest value per CC, -1 = nothing new
-    void timerCallback() override { applyPendingMidi(); processFinishedTake(); }
+    void timerCallback() override { applyPendingMidi(); processFinishedTake(); flushBankRecall(); }
+
+    // Banks (see numBanks). slots[k] holds bank k's material while it isn't playing; the
+    // playing one is 'bank' and its slot is null. Guarded by bankLock.
+    std::atomic<int> activeBank { 0 };
+    Bank::Ptr slots[numBanks];
+    std::atomic<float> slotBases[numBanks][SliceSet::maxMarkers] {};
+    std::vector<juce::RangedAudioParameter*> scoped;     // the parameters a bank remembers
+    std::vector<std::atomic<float>*> scopedRaw;
+    std::unique_ptr<std::atomic<float>[]> slotValues[numBanks];
+    std::atomic<bool> slotHasValues[numBanks] {};
+    std::atomic<int> recallPending { -1 };
+    std::atomic<float>* bankParam = nullptr;
+    bool switchOverdue = false;
+    juce::MidiBuffer splitMidiA, splitMidiB;
+    void renderSegment (juce::AudioBuffer<float>&, juce::MidiBuffer&, int segmentOffset);
+    bool switchBankNow (int to, double atPpq);   // audio thread
 
     // Take recording (two buffers, so a new take can start while the last is being saved).
     std::vector<float> takeBuf[2];
