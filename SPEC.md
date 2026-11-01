@@ -99,3 +99,8 @@ Milestone 0, toolchain: Xcode is already installed (used for the iOS Roadbook ap
 6. Spatial modes and tempo sync
 7. Slicing and presets with embedded audio (slot in earlier if their absence gets annoying)
 Rules for the build chat: keep the spec as the source of truth and update it when a decision changes; prefer small testable commits; never add a feature not in the spec without asking.
+
+Additions (Nov 1, Wiley's requests)
+• Slice markers automatable: 15 host parameters (share of phrase, 0 = off); regions resolved every block; waveform edits write the parameters (recorded as automation). Positions are relative to the phrase, so they scale if the phrase length changes (e.g. a later-starting stem is added).
+• Autotune: Tune (0–100%), Root (C–B), Scale (Root = monotone on the root in each voice's own octave; Minor; Major = snap each period to the scale). Dry voices via PSOLA per period; encoded voices via the codec excitation; applies to every voice including the primary; stacks with Spread and Screwed.
+• Recording: a Sidechain input bus (stereo, summed to mono) feeds a REC parameter; takes up to 60 s, trimmed (30 ms before first sound, 80 ms after last; gate -30 dB under the take's peak and above -70 dBFS), saved to ~/Music/drosaka Voice/Takes/*.wav, added and auto-aligned, embedded in the set.

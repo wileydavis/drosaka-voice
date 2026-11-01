@@ -548,6 +548,14 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     styleSwitch (latchButton, colours::slice, "latch", latchAttachment);
     latchButton.setTooltip ("Pattern keeps walking after you let go of the key");
 
+    // Autotune and recording.
+    tuneCell = std::make_unique<KnobCell> (proc, "tuneAmount", "TUNE", colours::pitch, std::function<juce::String()> {});
+    addAndMakeVisible (*tuneCell);
+    setupBox (tuneRootBox, tune::rootNames(), "tuneRoot", tuneRootAttachment);
+    setupBox (tuneScaleBox, tune::scaleNames(), "tuneScale", tuneScaleAttachment);
+    styleSwitch (recordButton, juce::Colour (0xffe0303a), "record", recordAttachment);
+    recordButton.setTooltip ("Record a take from this device's Sidechain input (pick the source track in Live's Sidechain menu on the device)");
+
     listView.setViewedComponent (&listContent, false);
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
@@ -560,6 +568,7 @@ DrosakaVoiceEditor::~DrosakaVoiceEditor()
 {
     rows.clear();
     cells.clear();
+    tuneCell.reset();
 }
 
 void DrosakaVoiceEditor::addFiles (const juce::StringArray& paths)
@@ -631,6 +640,8 @@ void DrosakaVoiceEditor::timerCallback()
     for (auto& r : rows) r->repaint();
     for (auto& c : cells) c->repaint();   // values that follow the music (Encode of N audible...) and CC badges
     sliceView->repaint();                 // markers can be moved by automation
+    if (tuneCell != nullptr) tuneCell->repaint();
+    if (auto msg = proc.getRecordMessage(); msg != lastRecordMessage) { lastRecordMessage = msg; status = msg; repaint(); }
     repaint (panelArea());
 }
 
@@ -663,7 +674,7 @@ juce::Rectangle<int> DrosakaVoiceEditor::panelArea() const
 juce::Rectangle<int> DrosakaVoiceEditor::fieldArea() const
 {
     auto p = panelArea().reduced (10);
-    return p.removeFromBottom (150);
+    return p.removeFromBottom (112);
 }
 
 void DrosakaVoiceEditor::resized()
@@ -684,10 +695,15 @@ void DrosakaVoiceEditor::resized()
     playModeBox.setBounds (p.getX(), p.getY() + 18, w3, 26);
     pitchLockBox.setBounds (p.getX() + w3 + 8, p.getY() + 18, w3, 26);
     quantBox.setBounds (p.getX() + 2 * (w3 + 8), p.getY() + 18, w3, 26);
-    dropButton.setBounds (p.getX(), p.getY() + 74, w3, 40);
-    keepHumanButton.setBounds (p.getX() + w3 + 8, p.getY() + 74, w3, 40);
-    latchButton.setBounds (p.getX() + 2 * (w3 + 8), p.getY() + 74, w3, 40);
+    dropButton.setBounds (p.getX(), p.getY() + 70, w3, 34);
+    keepHumanButton.setBounds (p.getX() + w3 + 8, p.getY() + 70, w3, 34);
+    latchButton.setBounds (p.getX() + 2 * (w3 + 8), p.getY() + 70, w3, 34);
     keepHumanButton.setButtonText ("KEEP HUMAN");
+
+    tuneCell->setBounds (p.getX() - 2, p.getY() + 110, 100, 84);
+    tuneRootBox.setBounds (p.getX() + 104, p.getY() + 134, 64, 26);
+    tuneScaleBox.setBounds (p.getX() + 174, p.getY() + 134, 78, 26);
+    recordButton.setBounds (p.getRight() - 84, p.getY() + 124, 84, 34);
 
     listView.setBounds (16, g.getBottom() + 34, getWidth() - 32, getHeight() - g.getBottom() - 34 - 30);
     const int rowH = 34;
@@ -743,6 +759,24 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
                                 : proc.patternActive.load() ? "walking: " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + juce::jmax (0, sl), true, true, 3)
                                                             : "hold a key: the pattern starts on the next grid line",
                     p.getX(), p.getY() + 50, p.getWidth(), 14, juce::Justification::centredLeft);
+
+        // Tune labels and the record meter.
+        g.setFont (juce::FontOptions (10.5f));
+        g.setColour (colours::wave);
+        g.drawText ("ROOT", tuneRootBox.getX(), tuneRootBox.getY() - 16, 60, 14, juce::Justification::centredLeft);
+        g.drawText ("SCALE", tuneScaleBox.getX(), tuneScaleBox.getY() - 16, 70, 14, juce::Justification::centredLeft);
+        g.drawText ("TAKE", recordButton.getX(), recordButton.getY() - 16, 84, 14, juce::Justification::centredLeft);
+        {
+            const bool rec = proc.recordingNow.load();
+            auto meter = juce::Rectangle<int> (recordButton.getX(), recordButton.getBottom() + 6, recordButton.getWidth(), 5);
+            g.setColour (colours::row);
+            g.fillRect (meter);
+            g.setColour (juce::Colour (0xffe0303a));
+            g.fillRect (meter.withWidth (juce::roundToInt (juce::jmin (1.0f, proc.recordLevel.load() * 1.4f) * (float) meter.getWidth())));
+            g.setColour (rec ? colours::wave : colours::dim);
+            g.drawText (rec ? juce::String (proc.recordSeconds.load(), 1) + " s" : juce::String ("sidechain in"),
+                        meter.getX(), meter.getBottom() + 3, meter.getWidth(), 14, juce::Justification::centredLeft);
+        }
 
         // Stereo field: each audible voice as a dot (orange = primary, teal = encoded).
         auto f = fieldArea();

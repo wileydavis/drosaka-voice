@@ -88,6 +88,17 @@ public:
     void applyPendingMidi();                                // message thread: push CC moves to the host
     std::atomic<int> midiMapGeneration { 0 };
 
+    // Recording: route a track into the device's Sidechain input, then turn on "record".
+    // When it turns off, the take is trimmed of silence, saved as a WAV in the takes folder
+    // and added to the bank (auto-aligned to the primary).
+    static constexpr double maxTakeSeconds = 60.0;
+    void processFinishedTake();                       // message thread (timer); public for tests
+    void setTakesFolder (const juce::File& f) { const juce::ScopedLock l (pathLock); takesFolder = f; }
+    juce::File getTakesFolder() const { const juce::ScopedLock l (pathLock); return takesFolder; }
+    juce::String getRecordMessage() const { const juce::ScopedLock l (pathLock); return recordMessage; }
+    std::atomic<bool> recordingNow { false };
+    std::atomic<float> recordSeconds { 0.0f }, recordLevel { 0.0f };
+
     // Presets: the same state the Live set stores (bank with embedded audio, slices, knobs).
     bool savePreset (const juce::File&);
     bool loadPreset (const juce::File&);
@@ -258,7 +269,20 @@ private:
     std::atomic<int> ccToParam[128];
     std::atomic<int> learnParam { -1 };
     std::atomic<float> pendingCc[128];        // latest value per CC, -1 = nothing new
-    void timerCallback() override { applyPendingMidi(); }
+    void timerCallback() override { applyPendingMidi(); processFinishedTake(); }
+
+    // Take recording (two buffers, so a new take can start while the last is being saved).
+    std::vector<float> takeBuf[2];
+    int takeIndex = 0, takePos = 0;
+    bool takeRecording = false, takeFull = false;
+    std::atomic<int> finishedTake { -1 };       // buffer index ready for the message thread
+    std::atomic<int> finishedLength { 0 };
+    std::atomic<bool> stopRequested { false };  // buffer filled: turn the record switch off
+    std::atomic<float>* recordParam = nullptr;
+    juce::File takesFolder;
+    juce::String recordMessage;
+    int takeCounter = 0;
+    void captureTake (const juce::AudioBuffer<float>& buffer);
     void handleCc (const juce::MidiMessage&);
     int paramIndex (const juce::String& id) const;
 

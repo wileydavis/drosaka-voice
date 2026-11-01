@@ -1379,6 +1379,91 @@ int main()
         CHECK (sc < 60.0f && mc < 40.0f, "encoded voices are retuned by the codec");
     }
 
+
+    std::printf ("recording from the sidechain\n");
+    {
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        const auto takes = tmp.getChildFile ("takes");
+        p.setTakesFolder (takes);
+        CHECK (p.getBusCount (true) == 2 && p.getBus (true, 1)->isEnabled() && p.getBus (true, 1)->getName() == "Sidechain",
+               "the device has a Sidechain input (Live's sidechain menu feeds it)");
+        CHECK (p.getBus (true, 0)->isEnabled() == false && p.getBus (false, 0)->getNumberOfChannels() == 2, "still an instrument: no main input, stereo out");
+
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        // Feed a signal into the sidechain channels (what Live hands the plugin) block by block.
+        auto feed = [&] (const juce::AudioBuffer<float>& src, int startSample, int blocks)
+        {
+            juce::AudioBuffer<float> blk (2, 256); juce::MidiBuffer m;
+            for (int k = 0; k < blocks; ++k)
+            {
+                blk.clear();
+                for (int i = 0; i < 256; ++i)
+                {
+                    const int at = startSample + k * 256 + i;
+                    const float x = at < src.getNumSamples() ? src.getSample (0, at) : 0.0f;
+                    blk.setSample (0, i, x); blk.setSample (1, i, x);
+                }
+                p.processBlock (blk, m);
+            }
+        };
+        // A take: 0.5 s of silence, 1.2 s of voice, 0.4 s of silence.
+        auto voice = voiceTone (160.0f, 0.4f, rate, (int) (rate * 1.2));
+        juce::AudioBuffer<float> takeSig (1, (int) (rate * 2.1)); takeSig.clear();
+        takeSig.copyFrom (0, (int) (rate * 0.5), voice, 0, 0, voice.getNumSamples());
+
+        set ("record", 1.0f);
+        feed (takeSig, 0, (int) (rate * 2.1) / 256);
+        CHECK (p.recordingNow.load() && p.recordSeconds.load() > 2.0f, "REC on: the sidechain is being captured");
+        set ("record", 0.0f);
+        feed (takeSig, 0, 2);
+        p.processFinishedTake();
+        auto b = p.getBank();
+        CHECK (b->size() == 1, "REC off: the take is added to the bank");
+        const double secs = b->stems[0]->audio.getNumSamples() / b->stems[0]->sampleRate;
+        std::printf ("       take trimmed to %.2f s (1.2 s of voice); %s\n", secs, p.getRecordMessage().toRawUTF8());
+        CHECK (secs > 1.2 && secs < 1.4, "silence before and after is trimmed off");
+        CHECK (std::abs (b->stems[0]->analysis.pitchHz - 160.0f) < 3.0f, "it's the recorded voice");
+        CHECK (takes.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 1, "and saved as a WAV in the takes folder");
+
+        // A second take, sung later in its recording: auto-aligned to the first.
+        auto voice2 = voiceTone (220.0f, 0.4f, rate, (int) (rate * 1.2));
+        for (int i = 0; i < voice2.getNumSamples(); ++i)   // same syllable rhythm as the first take
+        {
+            const double t = i / rate, ph = std::fmod (t, 0.3);
+            const float env = ph < 0.2 ? (float) std::sin (juce::MathConstants<double>::pi * ph / 0.2) : 0.0f;
+            voice2.setSample (0, i, voice2.getSample (0, i) * env);
+            voice.setSample (0, i, voice.getSample (0, i) * env);
+        }
+        // redo take 1 with the same rhythm so both share it
+        p.removeStem (0);
+        takeSig.clear(); takeSig.copyFrom (0, (int) (rate * 0.5), voice, 0, 0, voice.getNumSamples());
+        set ("record", 1.0f); feed (takeSig, 0, (int) (rate * 2.1) / 256); set ("record", 0.0f); feed (takeSig, 0, 2); p.processFinishedTake();
+        juce::AudioBuffer<float> take2 (1, (int) (rate * 2.5)); take2.clear();
+        take2.copyFrom (0, (int) (rate * 0.9), voice2, 0, 0, voice2.getNumSamples());
+        set ("record", 1.0f); feed (take2, 0, (int) (rate * 2.5) / 256); set ("record", 0.0f); feed (take2, 0, 2); p.processFinishedTake();
+        b = p.getBank();
+        std::printf ("       second take: offset %.1f ms, alignment %d\n", b->size() > 1 ? b->flags[1].offsetSec * 1000 : 0.0, b->size() > 1 ? (int) b->flags[1].align : -1);
+        CHECK (b->size() == 2 && b->flags[1].align == AlignState::autoAligned && std::abs (b->flags[1].offsetSec) < 0.01,
+               "a second take is auto-aligned to the first (both trimmed to their first sound)");
+
+        // Nothing routed in: silence -> nothing added, and a hint.
+        juce::AudioBuffer<float> silence (1, (int) rate); silence.clear();
+        set ("record", 1.0f); feed (silence, 0, 100); set ("record", 0.0f); feed (silence, 0, 2); p.processFinishedTake();
+        CHECK (p.getBank()->size() == 2 && p.getRecordMessage().contains ("Sidechain"), "a silent take adds nothing and says how to route audio in");
+
+        // The take buffer fills (60 s): recording stops itself and the switch turns off.
+        juce::AudioBuffer<float> longSig (1, (int) (rate * 61)); longSig.clear();
+        for (int i = 0; i < longSig.getNumSamples(); ++i) longSig.setSample (0, i, 0.2f * std::sin (juce::MathConstants<float>::twoPi * 150.0f * (float) i / (float) rate));
+        set ("record", 1.0f); feed (longSig, 0, (int) (rate * 61) / 256); p.processFinishedTake();
+        CHECK (p.params.getParameter ("record")->getValue() < 0.5f && p.getBank()->size() == 3, "a full 60 s take stops itself and is kept");
+
+        // Takes are embedded in the set like any stem.
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        takes.deleteRecursively();
+        DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (q.getBank()->size() == 3, "recorded takes travel with the set (even if the WAVs are gone)");
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

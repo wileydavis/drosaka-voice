@@ -26,7 +26,10 @@ namespace
 }
 
 DrosakaVoiceProcessor::DrosakaVoiceProcessor()
-    : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+    : AudioProcessor (BusesProperties()
+                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                          .withInput ("Input", juce::AudioChannelSet::stereo(), false)          // unused: this is an instrument
+                          .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true)),    // recording input
       params (*this, nullptr, "PARAMS", createLayout())
 {
     formatManager.registerBasicFormats();
@@ -39,6 +42,8 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     tuneAmountParam = params.getRawParameterValue ("tuneAmount");
     tuneRootParam = params.getRawParameterValue ("tuneRoot");
     tuneScaleParam = params.getRawParameterValue ("tuneScale");
+    recordParam = params.getRawParameterValue ("record");
+    takesFolder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("drosaka Voice").getChildFile ("Takes");
     spreadParam = params.getRawParameterValue ("spread");
     chordParam = params.getRawParameterValue ("chord");
     snapParam = params.getRawParameterValue ("snap");
@@ -133,6 +138,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneRoot", 1 }, "Tune root", tune::rootNames(), 0));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneScale", 1 }, "Tune scale", tune::scaleNames(), 0));
 
+    // Record a take from the sidechain input (automatable: punch in on a cue).
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "record", 1 }, "Record take", false));
+
     // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
@@ -145,8 +153,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
 
 bool DrosakaVoiceProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
-        && layouts.getMainInputChannelSet().isDisabled();
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+    if (! layouts.getMainInputChannelSet().isDisabled()) return false;
+    if (layouts.inputBuses.size() > 1)
+    {
+        const auto sc = layouts.inputBuses[1];
+        if (! (sc.isDisabled() || sc == juce::AudioChannelSet::mono() || sc == juce::AudioChannelSet::stereo())) return false;
+    }
+    return true;
 }
 
 void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
@@ -171,6 +185,8 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
         d.depthPos = 0;
         d.depth = 0.0f;
     }
+    for (auto& tb : takeBuf) tb.assign ((size_t) (maxTakeSeconds * sampleRate), 0.0f);
+    takePos = 0; takeRecording = false; takeFull = false;
     reverb.setSampleRate (sampleRate);
     juce::Reverb::Parameters rp;
     rp.roomSize = 0.55f; rp.damping = 0.45f; rp.wetLevel = 1.0f; rp.dryLevel = 0.0f; rp.width = 1.0f;
@@ -641,9 +657,120 @@ void DrosakaVoiceProcessor::fireHit (const pattern::Hit& h, const Bank& b, doubl
     patternSlice = h.slice;
 }
 
+void DrosakaVoiceProcessor::captureTake (const juce::AudioBuffer<float>& buffer)
+{
+    const bool want = recordParam->load() > 0.5f && ! takeBuf[0].empty();
+    if (want && ! takeRecording)
+    {
+        takeRecording = true;
+        takeFull = false;
+        takePos = 0;
+    }
+    if (takeRecording && want && ! takeFull)
+    {
+        // Mono sum of the sidechain (silence if nothing is routed in).
+        auto* sc = getBusCount (true) > 1 ? getBus (true, 1) : nullptr;
+        const int n = buffer.getNumSamples();
+        auto& tb = takeBuf[takeIndex];
+        const int room = (int) tb.size() - takePos;
+        const int m = juce::jmin (n, room);
+        float peak = 0.0f;
+        if (sc != nullptr && sc->isEnabled() && sc->getNumberOfChannels() > 0)
+        {
+            auto in = getBusBuffer (const_cast<juce::AudioBuffer<float>&> (buffer), true, 1);
+            const int chans = in.getNumChannels();
+            for (int i = 0; i < m; ++i)
+            {
+                float x = 0.0f;
+                for (int ch = 0; ch < chans; ++ch) x += in.getSample (ch, i);
+                x /= (float) chans;
+                tb[(size_t) (takePos + i)] = x;
+                peak = juce::jmax (peak, std::abs (x));
+            }
+        }
+        else std::fill (tb.begin() + takePos, tb.begin() + takePos + m, 0.0f);
+        takePos += m;
+        recordLevel = peak;
+        recordSeconds = (float) (takePos / hostRate);
+        if (m < n) { takeFull = true; stopRequested = true; }
+    }
+    if (takeRecording && (! want || takeFull) && finishedTake.load() < 0)
+    {
+        // Hand the take to the message thread and switch buffers for the next one.
+        finishedLength = takePos;
+        finishedTake = takeIndex;
+        takeIndex ^= 1;
+        takeRecording = false;
+        recordLevel = 0.0f;
+    }
+    recordingNow = takeRecording;
+}
+
+void DrosakaVoiceProcessor::processFinishedTake()
+{
+    if (stopRequested.exchange (false))
+    {
+        auto* prm = params.getParameter ("record");
+        prm->beginChangeGesture(); prm->setValueNotifyingHost (0.0f); prm->endChangeGesture();
+    }
+    const int idx = finishedTake.load();
+    if (idx < 0) return;
+    const int len = finishedLength.load();
+    const auto& tb = takeBuf[idx];
+
+    // Trim silence: keep from 30 ms before the first sound to 80 ms after the last.
+    const int win = juce::jmax (1, (int) (0.01 * hostRate));
+    std::vector<float> rms;
+    float loudest = 0.0f;
+    for (int i = 0; i + win <= len; i += win)
+    {
+        double e = 0.0;
+        for (int j = 0; j < win; ++j) e += (double) tb[(size_t) (i + j)] * tb[(size_t) (i + j)];
+        rms.push_back ((float) std::sqrt (e / win));
+        loudest = juce::jmax (loudest, rms.back());
+    }
+    const float gate = juce::jmax (loudest * 0.03f, 3e-4f);   // -30 dB below the take, and above -70 dBFS
+    int first = -1, last = -1;
+    for (int k = 0; k < (int) rms.size(); ++k) if (rms[(size_t) k] > gate) { if (first < 0) first = k; last = k; }
+
+    juce::String message;
+    if (first < 0)
+    {
+        message = "Nothing recorded: route a track into this device's Sidechain input, then record";
+    }
+    else
+    {
+        const int a = juce::jmax (0, first * win - (int) (0.03 * hostRate));
+        const int z = juce::jmin (len, (last + 1) * win + (int) (0.08 * hostRate));
+        juce::AudioBuffer<float> take (1, z - a);
+        take.copyFrom (0, 0, tb.data() + a, z - a);
+        take.applyGainRamp (0, 0, juce::jmin (64, z - a), 0.0f, 1.0f);
+        take.applyGainRamp (0, juce::jmax (0, (z - a) - 256), juce::jmin (256, z - a), 1.0f, 0.0f);
+
+        auto folder = getTakesFolder();
+        folder.createDirectory();
+        const auto name = "take " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H%M%S") + "-" + juce::String (++takeCounter);
+        auto file = folder.getChildFile (name + ".wav");
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (file), hostRate, 1, 24, {}, 0));
+            if (w != nullptr) w->writeFromAudioSampleBuffer (take, 0, take.getNumSamples());
+        }
+        juce::StringArray errs;
+        if (addStems ({ file.getFullPathName() }, errs) == 1)
+            message = "Recorded " + juce::String (take.getNumSamples() / hostRate, 1) + " s: " + file.getFileNameWithoutExtension();
+        else
+            message = errs.joinIntoString (" ");
+    }
+    { const juce::ScopedLock l (pathLock); recordMessage = message; }
+    finishedTake = -1;
+    ++bankGeneration;
+}
+
 void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    captureTake (buffer);   // before the buffer is cleared for output: it holds the sidechain input
     buffer.clear();
 
     // MIDI-learned controls work whether or not a bank is loaded.

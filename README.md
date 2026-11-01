@@ -33,6 +33,25 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 7 Slicing + presets w/ embedded audio | ✅ done — tested in Live, worked perfectly |
 | 8 Pattern mode + open questions (Drop, Keep primary human, Depth) | ✅ done — tested in Live, sounds good |
 | 9 4x4 control grid + MIDI learn | ✅ done |
+| 10 Automatable slice markers, autotune, recording | Written and passing offline tests. **Awaiting a test in Live** |
+
+### Milestone 10 behaviour (as built)
+
+**Slice markers are automatable.** The 15 marker parameters (*Slice marker 1–15*) each hold a position as a share of the phrase, and "off" means unused. Automate them in Live and the slices move while it plays. Markers automated past each other simply swap order. Editing markers on the waveform writes these parameters, so drags record as automation when Live is armed. Older sets' markers are converted automatically.
+
+**Autotune** (Performance panel: TUNE, ROOT, SCALE):
+- **Root:** every voice sits on the root note, each in the octave nearest its own register, so the crowd keeps its spread. This is the most robotic setting
+- **Minor / Major:** each pitch period snaps to the nearest note of that scale on the root
+- **TUNE** sets the strength: 0 is off, 100% is a hard snap, and values in between pull part of the way
+- **Dry voices** are retuned period by period with the same pitch-shifting as Spread (formants and timing kept), and encoded voices are retuned inside the codec. It stacks with Spread and Screwed
+- TUNE is MIDI-learnable like the grid knobs
+
+**Recording takes:**
+1. In Live, open the device's **Sidechain** section (the triangle at the left of the device, or the device title bar for AU), switch it on, and pick the track to record from, such as a mic track, in *Audio From*
+2. Press **REC** in the Performance panel. The meter shows the input and the timer counts up
+3. Press **REC** again to stop. The take is trimmed of silence, saved as a WAV in `~/Music/drosaka Voice/Takes`, added to the bank, auto-aligned to the primary, and embedded in the set like any stem. Takes can run up to 60 s; a full buffer stops itself
+- REC is a parameter too, so you can MIDI-learn it or automate it to punch in on a cue
+- A silent take adds nothing, and the footer explains how to route audio in
 
 ### Controls: the 4×4 grid and MIDI
 
@@ -50,7 +69,7 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 - **Double-click** a knob to reset it
 - **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH) and the stereo-field view sit in the Performance panel beside the grid
 - **MIDI learn:** right-click a knob, choose MIDI learn, then turn a controller. The knob shows its CC in the corner. Any channel works, and one CC drives one knob (re-learning moves it). Right-click and choose Forget to remove it. Mappings save with the Live set and presets
-- **Host parameters:** every control (22 in all) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
+- **Host parameters:** every control (41 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
 - **Controller layout:** the grid is laid out to match a 16-encoder controller like the MIDI Fighter Twister one-to-one: learn each knob to the encoder in the same position
 
 ### Milestone 8 behaviour (as built)

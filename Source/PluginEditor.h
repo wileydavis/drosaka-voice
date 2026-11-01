@@ -46,8 +46,13 @@ private:
     std::unique_ptr<SliceView> sliceView;
     std::vector<std::unique_ptr<KnobCell>> cells;   // the 4x4 grid
 
-    juce::ComboBox playModeBox, pitchLockBox, quantBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment, pitchLockAttachment, quantAttachment;
+    juce::ComboBox playModeBox, pitchLockBox, quantBox, tuneRootBox, tuneScaleBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment, pitchLockAttachment, quantAttachment,
+                                                                            tuneRootAttachment, tuneScaleAttachment;
+    std::unique_ptr<KnobCell> tuneCell;
+    juce::TextButton recordButton { "REC" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> recordAttachment;
+    juce::String lastRecordMessage;
     juce::TextButton dropButton { "DROP" }, keepHumanButton { "KEEP HUMAN" }, latchButton { "LATCH" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> dropAttachment, keepHumanAttachment, latchAttachment;
 
