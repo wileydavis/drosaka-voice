@@ -32,7 +32,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 | 6 Spatial modes + tempo sync | ✅ done — tested in Live, sounds good |
 | 7 Slicing + presets w/ embedded audio | ✅ done — tested in Live, worked perfectly |
 | 8 Pattern mode + open questions (Drop, Keep primary human, Depth) | ✅ done — tested in Live, sounds good |
-| 9 4x4 control grid + MIDI learn | Written and passing offline tests. **Awaiting a look in Live** |
+| 9 4x4 control grid + MIDI learn | ✅ done |
 
 ### Controls: the 4×4 grid and MIDI
 

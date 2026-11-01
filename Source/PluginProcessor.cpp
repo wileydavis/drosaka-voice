@@ -35,6 +35,7 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     startTimerHz (60);   // applies MIDI-learned CC moves on the message thread
     countParam = params.getRawParameterValue ("count");
     encodeParam = params.getRawParameterValue ("encodeCount");
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) sliceParams[i] = params.getRawParameterValue ("slice" + juce::String (i + 1));
     spreadParam = params.getRawParameterValue ("spread");
     chordParam = params.getRawParameterValue ("chord");
     snapParam = params.getRawParameterValue ("snap");
@@ -61,6 +62,7 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
 juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::createLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "count", 1 }, "Count",
         juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f,
@@ -119,6 +121,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keepHuman", 1 }, "Keep primary human", false));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "depth", 1 }, "Depth",
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
+
+    // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
+    for (int i = 1; i <= SliceSet::maxMarkers; ++i)
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { "slice" + juce::String (i), 1 }, "Slice marker " + juce::String (i),
+            juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+            juce::AudioParameterFloatAttributes().withStringFromValueFunction (
+                [] (float v, int) { return v <= 0.002f ? juce::String ("off") : juce::String (v * 100.0f, 1) + "%"; })));
     return layout;
 }
 
@@ -356,34 +366,47 @@ void DrosakaVoiceProcessor::resetOffset (int idx)
     swapBank (b, false);
 }
 
+SliceSet DrosakaVoiceProcessor::getSlices() const
+{
+    float pos[SliceSet::maxMarkers];
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) pos[i] = sliceParams[i]->load();
+    return SliceSet::fromPositions (pos, getBank()->lengthSeconds());
+}
+
+void DrosakaVoiceProcessor::setSliceParam (int slot, float v)
+{
+    auto* prm = params.getParameter ("slice" + juce::String (slot + 1));
+    prm->beginChangeGesture();
+    prm->setValueNotifyingHost (v);
+    prm->endChangeGesture();
+}
+
 void DrosakaVoiceProcessor::addSlice (double sec)
 {
-    auto b = getBank()->clone();
-    const double len = b->lengthSeconds();
-    if (sec <= 0.005 || sec >= len - 0.005) return;
-    for (auto m : b->slices) if (std::abs (m - sec) < 0.01) return;   // too close to an existing marker
-    b->slices.push_back (sec);
-    std::sort (b->slices.begin(), b->slices.end());
-    swapBank (b, false);
+    const double len = getBank()->lengthSeconds();
+    if (len <= 0.0 || sec <= 0.005 || sec >= len - 0.005) return;
+    const auto sl = getSlices();
+    for (int i = 0; i < sl.n; ++i) if (std::abs (sl.t[i] - sec) < 0.01) return;   // too close to an existing marker
+    for (int slot = 0; slot < SliceSet::maxMarkers; ++slot)
+        if (sliceParams[slot]->load() <= 0.002f) { setSliceParam (slot, (float) (sec / len)); return; }
 }
 
 void DrosakaVoiceProcessor::moveSlice (int i, double sec)
 {
-    auto b = getBank()->clone();
-    if (i < 0 || i >= (int) b->slices.size()) return;
-    const double lo = (i > 0 ? b->slices[(size_t) i - 1] : 0.0) + 0.01;
-    const double hi = (i + 1 < (int) b->slices.size() ? b->slices[(size_t) i + 1] : b->lengthSeconds()) - 0.01;
+    const auto sl = getSlices();
+    const double len = getBank()->lengthSeconds();
+    if (i < 0 || i >= sl.n || len <= 0.0) return;
+    const double lo = (i > 0 ? sl.t[i - 1] : 0.0) + 0.012;
+    const double hi = (i + 1 < sl.n ? sl.t[i + 1] : len) - 0.012;
     if (hi <= lo) return;
-    b->slices[(size_t) i] = juce::jlimit (lo, hi, sec);
-    swapBank (b, false);
+    setSliceParam (sl.slot[i], (float) (juce::jlimit (lo, hi, sec) / len));
 }
 
 void DrosakaVoiceProcessor::removeSlice (int i)
 {
-    auto b = getBank()->clone();
-    if (i < 0 || i >= (int) b->slices.size()) return;
-    b->slices.erase (b->slices.begin() + i);
-    swapBank (b, false);
+    const auto sl = getSlices();
+    if (i < 0 || i >= sl.n) return;
+    setSliceParam (sl.slot[i], 0.0f);
 }
 
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
@@ -542,14 +565,14 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
     }
 }
 
-void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double ppqAt, const Bank& b)
+void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double ppqAt, const Bank&)
 {
     if (msg.isNoteOn())
     {
         const int note = msg.getNoteNumber();
         held[note] = true;
         const int k = note - Bank::sliceRoot;
-        const bool sliceKey = b.numRegions() > 0 && k >= 0 && k < b.numRegions();
+        const bool sliceKey = liveSlices.numRegions() > 0 && k >= 0 && k < liveSlices.numRegions();
         if (! patternRunning)
         {
             // Start on the next grid line, from the slice played (or the top).
@@ -587,7 +610,7 @@ void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double pp
 void DrosakaVoiceProcessor::fireHit (const pattern::Hit& h, const Bank& b, double bpm)
 {
     double a = 0.0, z = b.lengthSeconds();
-    if (b.numRegions() > 0) b.region (Bank::sliceRoot + h.slice, a, z);
+    if (liveSlices.numRegions() > 0) liveSlices.region (Bank::sliceRoot + h.slice, b.lengthSeconds(), a, z);
     const double sliceSec = juce::jmax (0.01, z - a);
     const double stepSec = h.length * 60.0 / bpm;
     const double gate = gateParam->load();
@@ -623,6 +646,11 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     }
     Bank& b = *bank;
     const int n = juce::jmin (b.size(), maxVoices);
+    {
+        float pos[SliceSet::maxMarkers];
+        for (int i = 0; i < SliceSet::maxMarkers; ++i) pos[i] = sliceParams[i]->load();
+        liveSlices = SliceSet::fromPositions (pos, b.lengthSeconds());
+    }
 
     // Crowd targets for this block (encode and pans are per chunk: they follow the grid).
     float tg[maxVoices], tpRadiate[maxVoices], tp[maxVoices], te[maxVoices];
@@ -767,7 +795,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 {
                     pattern::Hit hits[8];
                     int nh = 0;
-                    const double len = pattern::nextStep (patternState, pp, b.numRegions(), nextStepPpq, hits, nh);
+                    const double len = pattern::nextStep (patternState, pp, liveSlices.numRegions(), nextStepPpq, hits, nh);
                     for (int h = 0; h < nh; ++h) pending[numPending++] = { nextStepPpq + hits[h].offset, hits[h] };
                     nextStepPpq += len;
                 }
@@ -843,7 +871,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (at > cursor) renderDry (cursor, at - cursor, b, psolaRatio, wantPsola);
             cursor = at;
             double a, z;
-            b.region (meta.getMessage().getNoteNumber(), a, z);   // a slice key, or the whole phrase
+            liveSlices.region (meta.getMessage().getNoteNumber(), b.lengthSeconds(), a, z);   // a slice key, or the whole phrase
             startInstance (a * hostRate, (z - a) * hostRate, 1.0, 0.0f);
         }
         if (cursor < num) renderDry (cursor, num - cursor, b, psolaRatio, wantPsola);
@@ -966,9 +994,7 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
     juce::ValueTree bankTree ("Bank");
     bankTree.setProperty ("axis", (int) b->axis, nullptr);
     bankTree.setProperty ("primaryIndex", b->primary, nullptr);
-    juce::StringArray sl;
-    for (auto t : b->slices) sl.add (juce::String (t, 6));
-    bankTree.setProperty ("slices", sl.joinIntoString (","), nullptr);
+    // (Slice markers are parameters now; they're in the params child above.)
     for (int i = 0; i < b->size(); ++i)
     {
         const auto& st = *b->stems[(size_t) i];
@@ -1028,6 +1054,7 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     Bank::Ptr b = new Bank();
     juce::StringArray missing;
     juce::FlacAudioFormat flac;
+    std::vector<double> legacySlices;
 
     auto bankTree = state.getChildWithName ("Bank");
     if (bankTree.isValid())
@@ -1066,9 +1093,9 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
             b->flags.push_back (fl);
         }
+        // Sets from before markers were parameters: seconds in the bank tree.
         for (auto& t : juce::StringArray::fromTokens (bankTree.getProperty ("slices").toString(), ",", ""))
-            if (t.isNotEmpty()) b->slices.push_back (t.getDoubleValue());
-        std::sort (b->slices.begin(), b->slices.end());
+            if (t.isNotEmpty()) legacySlices.push_back (t.getDoubleValue());
     }
     else if (state.hasProperty ("stemPath"))   // Milestone 1 sets
     {
@@ -1083,6 +1110,16 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     if (b->primary >= 0 && b->primary < b->size()) b->flags[(size_t) b->primary].align = AlignState::reference;
     { const juce::ScopedLock l (pathLock); missingPaths = missing; }
     swapBank (b);
+
+    // Migrate old slice markers into the marker parameters.
+    if (! legacySlices.empty())
+    {
+        const double len = b->lengthSeconds();
+        std::sort (legacySlices.begin(), legacySlices.end());
+        for (int i = 0; i < SliceSet::maxMarkers; ++i)
+            params.getParameter ("slice" + juce::String (i + 1))->setValueNotifyingHost (
+                i < (int) legacySlices.size() && len > 0.0 ? (float) (legacySlices[(size_t) i] / len) : 0.0f);
+    }
 }
 
 //==============================================================================

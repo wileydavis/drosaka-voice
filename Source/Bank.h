@@ -33,6 +33,47 @@ struct Stem : public juce::ReferenceCountedObject
 
 enum class AlignState { reference = 0, autoAligned = 1, unsure = 2, manual = 3 };
 
+//==============================================================================
+// Slice markers, resolved for use: seconds on the phrase timeline, sorted. They live
+// in 15 host parameters (so they can be automated); 'slot' is which parameter each
+// marker came from. N markers make N+1 regions; region k plays on C3 + k.
+struct SliceSet
+{
+    static constexpr int maxMarkers = 15;
+    double t[maxMarkers] {};
+    int slot[maxMarkers] {};
+    int n = 0;
+
+    int numRegions() const { return n > 0 ? n + 1 : 0; }
+
+    // A slice key's region, or the whole phrase for any other key.
+    void region (int note, double lengthSec, double& startSec, double& endSec) const
+    {
+        startSec = 0.0;
+        endSec = lengthSec;
+        const int k = note - 60;
+        if (n == 0 || k < 0 || k > n) return;
+        if (k > 0) startSec = t[k - 1];
+        if (k < n) endSec = t[k];
+    }
+
+    // From normalised positions (0 = unused), for a phrase of lengthSec.
+    static SliceSet fromPositions (const float* pos, double lengthSec)
+    {
+        SliceSet s;
+        for (int i = 0; i < maxMarkers; ++i)
+            if (pos[i] > 0.002f && pos[i] < 0.998f) { s.t[s.n] = pos[i] * lengthSec; s.slot[s.n] = i; ++s.n; }
+        // sort by time (insertion: 15 at most), then drop markers within 8 ms of the previous
+        for (int i = 1; i < s.n; ++i)
+            for (int j = i; j > 0 && s.t[j] < s.t[j - 1]; --j) { std::swap (s.t[j], s.t[j - 1]); std::swap (s.slot[j], s.slot[j - 1]); }
+        int m = 0;
+        for (int i = 0; i < s.n; ++i)
+            if (m == 0 || s.t[i] - s.t[m - 1] >= 0.008) { s.t[m] = s.t[i]; s.slot[m] = s.slot[i]; ++m; }
+        s.n = m;
+        return s;
+    }
+};
+
 struct VoiceFlags
 {
     bool mute = false, solo = false;
@@ -53,7 +94,6 @@ struct Bank : public juce::ReferenceCountedObject
     SortAxis axis = SortAxis::pitch;
     std::vector<int> sorted;          // stem indices, low -> high on 'axis'
     std::vector<int> encodeOrder;     // stem indices in the order the codec takes them; primary last
-    std::vector<double> slices;       // slice markers, seconds on the phrase timeline (sorted)
 
     int size() const { return (int) stems.size(); }
 
@@ -66,19 +106,7 @@ struct Bank : public juce::ReferenceCountedObject
         return longest;
     }
 
-    // Slicing: markers split the phrase into regions; region k plays on note sliceRoot + k.
-    // Any other note plays the whole phrase.
-    static constexpr int sliceRoot = 60;   // C3 in Live's naming
-    int numRegions() const { return slices.empty() ? 0 : (int) slices.size() + 1; }
-    void region (int note, double& startSec, double& endSec) const
-    {
-        startSec = 0.0;
-        endSec = lengthSeconds();
-        const int k = note - sliceRoot;
-        if (slices.empty() || k < 0 || k >= numRegions()) return;
-        if (k > 0) startSec = slices[(size_t) k - 1];
-        if (k < (int) slices.size()) endSec = slices[(size_t) k];
-    }
+    static constexpr int sliceRoot = 60;   // C3 in Live's naming: region k plays on sliceRoot + k
 
     void resort()
     {
@@ -136,7 +164,6 @@ struct Bank : public juce::ReferenceCountedObject
         Ptr b = new Bank();
         b->stems = stems; b->flags = flags; b->primary = primary; b->axis = axis; b->sorted = sorted;
         b->encodeOrder = encodeOrder;
-        b->slices = slices;
         return b;
     }
 };

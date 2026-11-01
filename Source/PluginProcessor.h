@@ -71,9 +71,12 @@ public:
     void alignAll();                                  // re-run auto-align against the primary
 
     // Slicing (message thread). Markers are seconds on the phrase timeline.
+    // Markers are host parameters slice1..slice15 (position as a share of the phrase),
+    // so they can be automated; these edit them (and record as automation when armed).
     void addSlice (double seconds);
-    void moveSlice (int index, double seconds);       // clamped between its neighbours
+    void moveSlice (int index, double seconds);       // index in time order; clamped between neighbours
     void removeSlice (int index);
+    SliceSet getSlices() const;                       // resolved for the current bank
 
     // MIDI learn: any parameter can be driven by a MIDI CC (any channel). The editor
     // arms a parameter; the next CC that arrives is bound to it. Mappings save with the set.
@@ -229,6 +232,9 @@ private:
     int numPending = 0;
     bool held[128] {};
     void patternNote (const juce::MidiMessage&, double ppqAtEvent, const Bank&);
+    SliceSet liveSlices;   // audio thread: the markers as of this block
+    std::atomic<float>* sliceParams[SliceSet::maxMarkers] {};
+    void setSliceParam (int slot, float normalised);
     void fireHit (const pattern::Hit&, const Bank&, double bpm);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
     float latchedEncodeVoices = 0.0f;

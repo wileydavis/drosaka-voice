@@ -239,12 +239,13 @@ public:
         auto xOf = [&] (double t) { return (float) area.getX() + (float) (t / len) * (float) area.getWidth(); };
 
         // Regions, shaded alternately, labelled with their key.
-        const int regions = b->numRegions();
+        const auto sl = proc.getSlices();
+        const int regions = sl.numRegions();
         g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
         for (int k = 0; k < regions; ++k)
         {
-            const double a0 = k == 0 ? 0.0 : b->slices[(size_t) k - 1];
-            const double a1 = k < (int) b->slices.size() ? b->slices[(size_t) k] : len;
+            const double a0 = k == 0 ? 0.0 : sl.t[k - 1];
+            const double a1 = k < sl.n ? sl.t[k] : len;
             const auto r = juce::Rectangle<float> (xOf (a0), (float) area.getY(), xOf (a1) - xOf (a0), (float) area.getHeight());
             if (k % 2 == 1) { g.setColour (colours::slice.withAlpha (0.06f)); g.fillRect (r); }
             g.setColour (colours::slice);
@@ -268,10 +269,10 @@ public:
         }
 
         // Markers.
-        for (size_t i = 0; i < b->slices.size(); ++i)
+        for (int i = 0; i < sl.n; ++i)
         {
-            const float x = xOf (b->slices[i]);
-            g.setColour ((int) i == dragging ? colours::wave : colours::slice);
+            const float x = xOf (sl.t[i]);
+            g.setColour (i == dragging ? colours::wave : colours::slice);
             g.fillRect (x - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight());
             juce::Path tri;
             tri.addTriangle (x - 6.0f, (float) area.getY(), x + 6.0f, (float) area.getY(), x, (float) area.getY() + 8.0f);
@@ -288,7 +289,7 @@ public:
         g.setFont (juce::FontOptions (11.0f));
         g.setColour (colours::dim);
         g.drawText ("primary: " + prim.file.getFileName(), area.reduced (8, 4), juce::Justification::topLeft);
-        g.drawText (b->slices.empty() ? "double-click to slice"
+        g.drawText (sl.n == 0 ? "double-click to slice"
                                       : juce::String (regions) + " slices from C3 - other keys play it all - drag / right-click markers",
                     area.reduced (8, 4), juce::Justification::topRight);
     }
@@ -328,8 +329,9 @@ private:
         auto b = getBank();
         if (b == nullptr) return -1;
         const double len = b->lengthSeconds();
-        for (size_t i = 0; i < b->slices.size(); ++i)
-            if (std::abs ((float) (b->slices[i] / len) * (float) getWidth() - (float) x) < 6.0f) return (int) i;
+        const auto sl = proc.getSlices();
+        for (int i = 0; i < sl.n; ++i)
+            if (std::abs ((float) (sl.t[i] / len) * (float) getWidth() - (float) x) < 6.0f) return i;
         return -1;
     }
 
@@ -628,6 +630,7 @@ void DrosakaVoiceEditor::timerCallback()
     }
     for (auto& r : rows) r->repaint();
     for (auto& c : cells) c->repaint();   // values that follow the music (Encode of N audible...) and CC badges
+    sliceView->repaint();                 // markers can be moved by automation
     repaint (panelArea());
 }
 
@@ -798,7 +801,7 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
     else
     {
         g.setColour (colours::dim);
-        const int regions = shownBank != nullptr ? shownBank->numRegions() : 0;
+        const int regions = proc.getSlices().numRegions();
         g.drawText (regions > 0 ? "C3 to " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + regions - 1, true, true, 3)
                                     + " play the slices across every voice; any other key plays the whole phrase"
                                 : juce::String ("any MIDI note plays the whole bank in sync; double-click the waveform to slice"),

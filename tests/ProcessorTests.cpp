@@ -5,6 +5,19 @@
 
 static int failures = 0;
 
+// Slice markers as times, from the marker parameters.
+static std::vector<double> sliceTimes (const DrosakaVoiceProcessor& p)
+{
+    const auto sl = p.getSlices();
+    return std::vector<double> (sl.t, sl.t + sl.n);
+}
+static bool near (const std::vector<double>& a, const std::vector<double>& b, double tol = 1e-4)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) if (std::abs (a[i] - b[i]) > tol) return false;
+    return true;
+}
+
 // A stand-in for Live's transport.
 struct TestPlayHead : juce::AudioPlayHead
 {
@@ -831,10 +844,9 @@ int main()
 
         p.addSlice (1.0); p.addSlice (0.5); p.addSlice (1.5);
         p.addSlice (1.004);   // too close to an existing marker
-        auto b = p.getBank();
-        CHECK (b->slices == std::vector<double> ({ 0.5, 1.0, 1.5 }) && b->numRegions() == 4, "markers stay sorted; near-duplicates ignored");
+        CHECK (near (sliceTimes (p), { 0.5, 1.0, 1.5 }) && p.getSlices().numRegions() == 4, "markers stay sorted; near-duplicates ignored");
         p.moveSlice (1, 0.2);   // can't cross its left neighbour
-        CHECK (std::abs (p.getBank()->slices[1] - 0.51) < 1e-9, "a dragged marker stops at its neighbour");
+        CHECK (std::abs (sliceTimes (p)[1] - 0.512) < 1e-4, "a dragged marker stops at its neighbour");
         p.moveSlice (1, 1.0);
 
         auto play = [&] (int note)
@@ -875,7 +887,7 @@ int main()
         CHECK (mag (last, L + 200, (int) (0.4 * rate)) > 0.01f && mag (last, L + (int) (0.6 * rate), 4000) < 1e-4f, "last slice runs to the end of the phrase");
 
         p.removeSlice (0); p.removeSlice (0); p.removeSlice (0);
-        CHECK (p.getBank()->slices.empty() && p.getBank()->numRegions() == 0, "removing every marker: back to whole-phrase playback");
+        CHECK (sliceTimes (p).empty() && p.getSlices().numRegions() == 0, "removing every marker: back to whole-phrase playback");
     }
 
     std::printf ("presets with embedded audio\n");
@@ -914,7 +926,7 @@ int main()
         CHECK (qb->stems[1]->sampleRate == 44100.0, "keeps each stem's own sample rate");
         CHECK (qb->primary == 1 && qb->flags[2].mute && std::abs (qb->flags[0].offsetSec - 0.123) < 1e-9,
                "primary, mute and alignment offsets come back");
-        CHECK (qb->slices == std::vector<double> ({ 0.7, 1.3 }), "slice markers come back");
+        CHECK (near (sliceTimes (q), { 0.7, 1.3 }), "slice markers come back");
         CHECK (std::abs (q.params.getParameter ("spread")->getValue() - 0.4f) < 1e-4f && (int) q.params.getRawParameterValue ("spatialMode")->load() == 2,
                "knob states come back");
         CHECK (std::abs (qb->stems[0]->analysis.pitchHz - 120.0f) < 3.0f && ! qb->stems[0]->marks.pos.empty(), "analysis rebuilt from the embedded audio");
@@ -922,7 +934,7 @@ int main()
         auto presetFile = tmp.getChildFile ("bank.dvoice");
         CHECK (q.savePreset (presetFile) && presetFile.getSize() > 1000, "Save preset writes a file");
         DrosakaVoiceProcessor r; r.prepareToPlay (rate, 256);
-        CHECK (r.loadPreset (presetFile) && r.getBank()->size() == 3 && r.getBank()->slices.size() == 2, "Load preset brings the whole bank back");
+        CHECK (r.loadPreset (presetFile) && r.getBank()->size() == 3 && sliceTimes (r).size() == 2, "Load preset brings the whole bank back");
         auto out = run (r, 256, 100, { 0 });
         CHECK (out.getMagnitude (0, out.getNumSamples()) > 0.01f, "a loaded preset plays");
 
@@ -1227,6 +1239,57 @@ int main()
         CHECK (q.getCcFor ("spread") == 30 && q.getCcFor ("patternType") == 22, "mappings save with the set");
         p.forgetCc ("spread");
         CHECK (p.getCcFor ("spread") == -1, "Forget removes a mapping");
+    }
+
+
+    std::printf ("slice markers as parameters\n");
+    {
+        auto tA = voiceTone (140.0f, 0.4f, rate, (int) (rate * 2.0));
+        auto fA = writeWav ("sm_a.wav", tA, rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fA.getFullPathName() }, errs);
+        const int L = p.getLatencySamples();
+        auto* m1 = p.params.getParameter ("slice1");
+        auto* m2 = p.params.getParameter ("slice2");
+        CHECK (m1 != nullptr && m1->isAutomatable() && p.params.getParameter ("slice15") != nullptr, "15 automatable marker parameters");
+        p.addSlice (1.0);
+        CHECK (std::abs (m1->getValue() - 0.5f) < 1e-4f, "a marker added on the waveform writes its parameter (half-way = 50%)");
+
+        // Automation moves it: the host sets the parameter, the slice follows.
+        m1->setValueNotifyingHost (0.25f);
+        m2->setValueNotifyingHost (0.75f);
+        CHECK (near (sliceTimes (p), { 0.5, 1.5 }), "automating marker parameters moves the slices");
+        auto play = [&] (int note)
+        {
+            run (p, 256, 500, {});
+            juce::AudioBuffer<float> out (2, 256 * 450), blk (2, 256);
+            for (int k = 0; k < 450; ++k)
+            {
+                juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+                p.processBlock (blk, m);
+                for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
+            }
+            return out;
+        };
+        auto mid = play (61);   // C#3: 0.5 .. 1.5 s
+        CHECK (mid.getMagnitude (0, L + (int) (0.9 * rate), 2000) > 0.01f && mid.getMagnitude (0, L + (int) (1.0 * rate) + 20, 4000) < 1e-4f,
+               "the slice key plays the automated span");
+        // Crossing markers (automation can do anything): they're simply re-sorted.
+        m1->setValueNotifyingHost (0.9f);
+        CHECK (near (sliceTimes (p), { 1.5, 1.8 }), "markers automated past each other just swap order");
+        p.removeSlice (0); p.removeSlice (0);
+        CHECK (m1->getValue() == 0.0f && m2->getValue() == 0.0f, "deleting a marker turns its parameter off");
+
+        // Sets saved before markers were parameters: seconds in the bank are migrated.
+        juce::ValueTree old ("DrosakaVoice");
+        old.setProperty ("version", 3, nullptr);
+        juce::ValueTree bt ("Bank");
+        bt.setProperty ("slices", "0.4,1.2", nullptr);
+        juce::ValueTree v ("Stem"); v.setProperty ("path", fA.getFullPathName(), nullptr); bt.appendChild (v, nullptr);
+        old.appendChild (bt, nullptr);
+        juce::MemoryBlock omb; juce::AudioProcessor::copyXmlToBinary (*old.createXml(), omb);
+        DrosakaVoiceProcessor o; o.setStateInformation (omb.getData(), (int) omb.getSize());
+        CHECK (near (sliceTimes (o), { 0.4, 1.2 }), "older sets' markers become marker parameters");
     }
 
     std::printf ("milestone 1 sets still open\n");
