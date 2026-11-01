@@ -184,6 +184,7 @@ private:
         double speed = 1.0;      // phrase samples per output sample (pattern stretch)
         double stopOut = 1e18;   // hit length in output samples (slice end, or step x gate)
         float pitchSemis = 0.0f; // per-hit transpose (Screwed)
+        float gain = 1.0f;       // per-hit level (Accent, ghosts)
         bool releasing = false;
         float env = 0.0f, envTarget = 0.0f, envStep = 0.0f;
         Psola psola[maxVoices];      // Spread (x hit pitch): shiftBuf
@@ -194,7 +195,7 @@ private:
     Stem::Ptr readStem (juce::AudioFormatReader*, const juce::File& displayFile, juce::String& error, bool encodeForEmbedding);
     void swapBank (Bank::Ptr, bool structural = true);
     void autoAlign (Bank& b, int stemIndex);
-    void startInstance (double startPos, double lengthOut, double speed, float pitchSemis);
+    void startInstance (double startPos, double lengthOut, double speed, float pitchSemis, float gain = 1.0f);
     // All stems, mono: direct playback into dryBuf, pitch-shifted into shiftBuf where asked.
     void renderDry (int start, int num, Bank& bank, const bool* wantPsola);
 
@@ -229,11 +230,15 @@ private:
     // Pattern mode (audio thread).
     struct PendingHit { double ppq; pattern::Hit hit; };
     std::atomic<float>* playModeParam = nullptr;
-    std::atomic<float>* patternTypeParam = nullptr;
+    std::atomic<float>* schemeParam = nullptr;
+    std::atomic<float>* lengthParam = nullptr;
+    std::atomic<float>* fillParam = nullptr;
+    std::atomic<float>* stutterParam = nullptr;
+    std::atomic<float>* variationParam = nullptr;
+    std::atomic<float>* swingParam = nullptr;
+    std::atomic<float>* accentParam = nullptr;
     std::atomic<float>* patternDivParam = nullptr;
     std::atomic<float>* gateParam = nullptr;
-    std::atomic<float>* densityParam = nullptr;
-    std::atomic<float>* repeatsParam = nullptr;
     std::atomic<float>* dropSemisParam = nullptr;
     std::atomic<float>* latchParam = nullptr;
     std::atomic<float>* dropParam = nullptr;
@@ -264,6 +269,7 @@ private:
     void setOffsetPct (int slot, float pct);
     std::vector<double> currentBases() const;
     void fireHit (const pattern::Hit&, const Bank&, double bpm);
+    void trimToSound (const Bank&, double& a, double& z);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
     float latchedEncodeVoices = 0.0f;
     std::vector<float> codecOut = std::vector<float> (chunkSize);

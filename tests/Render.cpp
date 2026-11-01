@@ -162,8 +162,8 @@ static int renderSpace (int argc, char** argv)
 }
 
 // Pattern tour at 120 bpm: DrosakaVoiceRender --pattern <out.wav> <primary> <stems...>
-// Slices are placed at the phrase's word gaps, then two bars each of: Walk 1/8, Repeat 1/16,
-// Stutter 1/8, Screwed 1/4, Skip/Rewind 1/8, Ratchet (4 bars from 1/4), Random 1/16.
+// Slices are placed at the phrase's word gaps; one held C2 plays every scheme in turn over a
+// four-on-the-floor kick (DV_NO_KICK=1 leaves it out). See the sections table.
 static int renderPattern (int argc, char** argv)
 {
     const double rate = 48000.0, spb = rate / 2.0;
@@ -193,19 +193,35 @@ static int renderPattern (int argc, char** argv)
         std::printf ("%d slices at word gaps\n", count);
     }
 
-    struct Section { int type, div, bars; float density; int repeats; };
-    const Section sections[] = { { 0, 1, 2, 1, 3 }, { 1, 2, 2, 1, 2 }, { 2, 1, 2, 1, 4 }, { 3, 0, 2, 1, 3 },
-                                 { 4, 1, 2, 0.6f, 3 }, { 5, 0, 4, 1, 3 }, { 6, 2, 2, 0.8f, 3 } };
+    // scheme, division, bars, length (-1 = ramp 0 -> 1), fill, stutter, variation, swing, accent
+    struct Section { int scheme, div, bars; float length, fill, stutter, variation, swing, accent; const char* name; };
+    const Section sections[] = {
+        { pattern::phrase,     2, 8, -1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.4f, "Phrase, Length unfolding" },
+        { pattern::anchor,     2, 4,  1.0f, 0.5f,  0.0f, 0.0f, 0.0f, 0.7f, "Anchor, Fill 50%" },
+        { pattern::offbeat,    2, 2,  1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f, "Offbeat" },
+        { pattern::rotate,     2, 4,  0.5f, 0.75f, 0.0f, 0.0f, 0.0f, 0.5f, "Rotate" },
+        { pattern::polymeter,  2, 4,  0.3f, 0.75f, 0.0f, 0.0f, 0.0f, 0.5f, "Polymeter" },
+        { pattern::pingPong,   1, 2,  1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.3f, "Ping-pong 1/8" },
+        { pattern::callAnswer, 2, 4,  1.0f, 0.75f, 0.3f, 0.0f, 0.0f, 0.5f, "Call & answer" },
+        { pattern::shuffle,    2, 4,  1.0f, 0.6f,  0.0f, 0.0f, 0.5f, 0.5f, "Shuffle, swing" },
+        { pattern::screwed,    1, 4,  1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.0f, "Screwed" },
+        { pattern::phrase,     2, 8,  0.6f, 0.7f,  0.7f, 0.6f, 0.3f, 0.6f, "Phrase, Stutter + Variation + swing" },
+        { pattern::build,      0, 4,  1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 0.3f, "Build" },
+    };
     int totalBars = 0; for (auto& sec : sections) totalBars += sec.bars;
     const int total = (int) (spb * 4 * totalBars) + p.getLatencySamples();
     juce::AudioBuffer<float> out (2, total), block (2, 512);
+    const Section* last = nullptr;
     for (int pos = 0; pos < total; pos += 512)
     {
         const double bar = (pos / spb) / 4.0;
-        int acc = 0; const Section* cur = &sections[0];
-        for (auto& sec : sections) { if (bar >= acc) cur = &sec; acc += sec.bars; }
-        set ("patternType", (float) cur->type); set ("patternDiv", (float) cur->div);
-        set ("density", cur->density); set ("repeats", (float) cur->repeats);
+        int acc = 0; const Section* cur = &sections[0]; double secStart = 0;
+        for (auto& sec : sections) { if (bar >= acc) { cur = &sec; secStart = acc; } acc += sec.bars; }
+        if (cur != last) { std::printf ("bar %3d: %s\n", (int) secStart + 1, cur->name); last = cur; }
+        set ("scheme", (float) cur->scheme); set ("patternDiv", (float) cur->div);
+        set ("phraseLength", cur->length < 0.0f ? (float) juce::jlimit (0.0, 1.0, (bar - secStart) / (cur->bars - 1)) : cur->length);
+        set ("fill", cur->fill); set ("stutter", cur->stutter); set ("variation", cur->variation);
+        set ("swing", cur->swing); set ("accent", cur->accent);
         juce::MidiBuffer midi;
         if (pos == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 48, (juce::uint8) 100), 0);
         p.processBlock (block, midi);
@@ -213,6 +229,20 @@ static int renderPattern (int argc, char** argv)
         const int m = juce::jmin (512, total - pos);
         for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, pos, block, ch, 0, m);
     }
+    // A plain kick on every beat, in time with what you hear (after the plugin's latency).
+    if (std::getenv ("DV_NO_KICK") == nullptr)
+        for (int beat = 0; beat < totalBars * 4; ++beat)
+        {
+            const int at = (int) (beat * spb) + p.getLatencySamples();
+            double kph = 0;
+            for (int i = 0; i < (int) (0.25 * rate) && at + i < total; ++i)
+            {
+                const double t = i / rate;
+                kph += (45.0 + 110.0 * std::exp (-t * 30.0)) / rate;
+                const float k = (float) (0.5 * std::sin (juce::MathConstants<double>::twoPi * kph) * std::exp (-t * 9.0));
+                for (int ch = 0; ch < 2; ++ch) out.addSample (ch, at + i, k);
+            }
+        }
     const juce::File f (argv[2]);
     f.deleteFile();
     juce::WavAudioFormat wav;

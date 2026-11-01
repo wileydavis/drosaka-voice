@@ -50,6 +50,8 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment, pitchLockAttachment, quantAttachment,
                                                                             tuneRootAttachment, tuneScaleAttachment;
     std::unique_ptr<KnobCell> tuneCell, driftCell;
+    std::vector<std::unique_ptr<KnobCell>> feelCells;   // GATE SWING ACCENT SCREW DROP
+    static constexpr int cellH = 104;
     juce::TextButton recordButton { "REC" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> recordAttachment;
     juce::String lastRecordMessage;

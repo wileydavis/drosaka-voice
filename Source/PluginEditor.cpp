@@ -516,12 +516,22 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
         { "depth",       "DEPTH",      colours::wave,   [this] { const float v = proc.params.getRawParameterValue ("depth")->load(); return v < 0.01f ? juce::String ("pure pan") : juce::String (juce::roundToInt (v * 100.0f)) + "%"; } },
         { "spatialMode", "SPACE",      colours::wave,   {} },
         { "motionDiv",   "RATE",       colours::wave,   {} },
-        { "patternType", "PATTERN",    colours::slice,  {} },
+        { "scheme",      "SCHEME",     colours::slice,  {} },
         { "patternDiv",  "DIVISION",   colours::slice,  {} },
-        { "gate",        "GATE",       colours::slice,  pct ("gate") },
-        { "density",     "DENSITY",    colours::slice,  pct ("density") },
-        { "repeats",     "REPEATS",    colours::slice,  {} },
-        { "dropSemis",   "SCREW DROP", colours::slice,  {} },
+        { "phraseLength","LENGTH",     colours::slice,  [this]
+            {
+                const int R = juce::jmax (1, proc.getSlices().numRegions());
+                const int L = 1 + (int) std::lround (proc.params.getRawParameterValue ("phraseLength")->load() * (float) (R - 1));
+                return juce::String (L) + " of " + juce::String (R) + (R == 1 ? " slice" : " slices");
+            } },
+        { "fill",        "FILL",       colours::slice,  [this]
+            {
+                const int N = juce::jmax (1, (int) std::lround (4.0 / pattern::divisionBeats ((int) proc.params.getRawParameterValue ("patternDiv")->load())));
+                const int k = juce::jmax (1, (int) std::lround (proc.params.getRawParameterValue ("fill")->load() * (float) N));
+                return juce::String (k) + " of " + juce::String (N) + " steps";
+            } },
+        { "stutter",     "STUTTER",    colours::slice,  pct ("stutter") },
+        { "variation",   "VARIATION",  colours::slice,  pct ("variation") },
     };
     for (auto& d : defs)
     {
@@ -560,9 +570,16 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     styleSwitch (keepHumanButton, colours::accent, "keepHuman", keepHumanAttachment);
     keepHumanButton.setTooltip ("Encode never takes the primary: 100% = every voice but the real one");
     styleSwitch (latchButton, colours::slice, "latch", latchAttachment);
-    latchButton.setTooltip ("Pattern keeps walking after you let go of the key");
+    latchButton.setTooltip ("The pattern keeps looping after you let go of the key");
 
     // Autotune and recording.
+    // Pattern feel, in the Performance panel.
+    for (auto [id, title] : { std::pair<const char*, const char*> { "gate", "GATE" }, { "swing", "SWING" }, { "accent", "ACCENT" }, { "dropSemis", "SCREW DROP" } })
+    {
+        feelCells.push_back (std::make_unique<KnobCell> (proc, id, title, colours::slice, std::function<juce::String()> {}));
+        addAndMakeVisible (*feelCells.back());
+    }
+
     tuneCell = std::make_unique<KnobCell> (proc, "tuneAmount", "TUNE", colours::pitch, std::function<juce::String()> {});
     addAndMakeVisible (*tuneCell);
     driftCell = std::make_unique<KnobCell> (proc, "drift", "DRIFT", colours::pitch, std::function<juce::String()> {});
@@ -576,7 +593,7 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     listView.setScrollBarsShown (true, false);
     addAndMakeVisible (listView);
 
-    setSize (860, 880);
+    setSize (860, 960);
     startTimerHz (30);
 }
 
@@ -585,6 +602,7 @@ DrosakaVoiceEditor::~DrosakaVoiceEditor()
     rows.clear();
     cells.clear();
     tuneCell.reset();
+    feelCells.clear();
     driftCell.reset();
 }
 
@@ -659,6 +677,7 @@ void DrosakaVoiceEditor::timerCallback()
     sliceView->repaint();                 // markers can be moved by automation
     if (tuneCell != nullptr) tuneCell->repaint();
     if (driftCell != nullptr) driftCell->repaint();
+    for (auto& c : feelCells) c->repaint();
     if (auto msg = proc.getRecordMessage(); msg != lastRecordMessage) { lastRecordMessage = msg; status = msg; repaint(); }
     repaint (panelArea());
 }
@@ -683,7 +702,7 @@ void DrosakaVoiceEditor::updateTimeline()
 }
 
 juce::Rectangle<int> DrosakaVoiceEditor::waveArea() const   { return { 16, 50, getWidth() - 32, 100 }; }
-juce::Rectangle<int> DrosakaVoiceEditor::gridArea() const   { return { 16, waveArea().getBottom() + 30, 4 * 112, 4 * 84 }; }
+juce::Rectangle<int> DrosakaVoiceEditor::gridArea() const   { return { 16, waveArea().getBottom() + 30, 4 * 112, 4 * cellH }; }
 juce::Rectangle<int> DrosakaVoiceEditor::panelArea() const
 {
     auto g = gridArea();
@@ -706,7 +725,7 @@ void DrosakaVoiceEditor::resized()
 
     auto g = gridArea();
     for (size_t i = 0; i < cells.size(); ++i)
-        cells[i]->setBounds (g.getX() + (int) (i % 4) * 112, g.getY() + (int) (i / 4) * 84, 112, 84);
+        cells[i]->setBounds (g.getX() + (int) (i % 4) * 112, g.getY() + (int) (i / 4) * cellH, 112, cellH);
 
     auto p = panelArea().reduced (10);
     const int w3 = (p.getWidth() - 16) / 3;
@@ -723,6 +742,9 @@ void DrosakaVoiceEditor::resized()
     tuneRootBox.setBounds (p.getX() + 186, p.getY() + 124, 66, 24);
     tuneScaleBox.setBounds (p.getX() + 186, p.getY() + 168, 66, 24);
     recordButton.setBounds (p.getRight() - 84, p.getY() + 124, 84, 34);
+    const int fw = p.getWidth() / 4;
+    for (size_t i = 0; i < feelCells.size(); ++i)
+        feelCells[i]->setBounds (p.getX() + (int) i * fw, p.getY() + 200, fw, 84);
 
     listView.setBounds (16, g.getBottom() + 34, getWidth() - 32, getHeight() - g.getBottom() - 34 - 30);
     const int rowH = 34;
@@ -775,8 +797,8 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         const int sl = proc.patternSlice.load();
         g.setColour (proc.patternActive.load() ? colours::slice : colours::dim);
         g.drawText (! patternOn ? "keys play slices directly"
-                                : proc.patternActive.load() ? "walking: " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + juce::jmax (0, sl), true, true, 3)
-                                                            : "hold a key: the pattern starts on the next grid line",
+                                : proc.patternActive.load() ? "playing slice " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + juce::jmax (0, sl), true, true, 3)
+                                                            : "hold a key: the loop starts from its slice on the next grid line",
                     p.getX(), p.getY() + 50, p.getWidth(), 14, juce::Justification::centredLeft);
 
         // Tune labels and the record meter.

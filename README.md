@@ -86,19 +86,57 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 |---|---|---|---|
 | COUNT | SPREAD | SNAP | CHORD |
 | ENCODE | BIT RATE | FRAME DROP | DEPTH |
-| SPACE | RATE | PATTERN | DIVISION |
-| GATE | DENSITY | REPEATS | SCREW DROP |
+| SPACE | RATE | SCHEME | DIVISION |
+| LENGTH | FILL | STUTTER | VARIATION |
 
 - **Colours:** each knob is coloured by its section (crowd, pitch, codec, space, pattern)
 - **Readouts:** each cell shows a live value ("2.5 of 5", "chorus → chord", "1.5 of 3 audible")
 - **Double-click** a knob to reset it
-- **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH) and the stereo-field view sit in the Performance panel beside the grid
+- **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH), TUNE/DRIFT/ROOT/SCALE, the pattern feel knobs (GATE, SWING, ACCENT, SCREW DROP) and the stereo-field view sit in the Performance panel beside the grid
 - **MIDI learn:** right-click a knob, choose MIDI learn, then turn a controller. The knob shows its CC in the corner. Any channel works, and one CC drives one knob (re-learning moves it). Right-click and choose Forget to remove it. Mappings save with the Live set and presets
-- **VST3 vs AU:** the VST3 is built without JUCE's 2,080 hidden "MIDI CC" parameters, which had pushed it past Live's 64-parameter auto-list limit, so Live only showed the last-touched parameter. All 41 now list automatically on a **fresh** instance; an existing instance keeps its old list until you replace it or use Configure. The catch: a VST3 can't receive CCs without those parameters, so in the **VST3**, map knobs with Live's **MIDI Map mode** (Cmd-M, then click the parameter in the device panel). In the **AU**, both Live's MIDI Map and the right-click learn work
-- **Host parameters:** every control (41 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
+- **VST3 vs AU:** the VST3 is built without JUCE's 2,080 hidden "MIDI CC" parameters, which had pushed it past Live's 64-parameter auto-list limit, so Live only showed the last-touched parameter. All of them now list automatically on a **fresh** instance; an existing instance keeps its old list until you replace it or use Configure. The catch: a VST3 can't receive CCs without those parameters, so in the **VST3**, map knobs with Live's **MIDI Map mode** (Cmd-M, then click the parameter in the device panel). In the **AU**, both Live's MIDI Map and the right-click learn work
+- **Host parameters:** every control (46 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
 - **Controller layout:** the grid is laid out to match a 16-encoder controller like the MIDI Fighter Twister one-to-one: learn each knob to the encoder in the same position
 
-### Milestone 8 behaviour (as built)
+### Pattern schemes (Nov 1 rework)
+
+Switch **PLAY** to Pattern and hold one key. The loop starts from that key's slice on the next grid line and runs on through **every** slice, wrapping around. C#3 starts at slice 2; a key outside the slice range starts at the top. Holding another slice key restarts the loop there; LATCH keeps it going after you let go.
+
+**Four macros, the same in every scheme** (bottom grid row, all automatable and MIDI-learnable):
+- **LENGTH:** how many slices the loop uses, from the trigger slice (one word on repeat … the whole line). Automate it over 16 bars to unfold the phrase. A change waits for the loop's next restart, so nothing stumbles
+- **FILL:** how many of the bar's steps get a hit, spread evenly (Euclidean, first hit on the downbeat): 3, 5 or 7 of 16 for sparse techno pulses, all 16 for a stream. Rests don't skip words; the phrase picks up on the next hit
+- **STUTTER:** rolls. A hit becomes 2, 3, 4 or 6 retriggers of the slice's opening, more of them and faster as you turn it up, gathering at the end of every 4 bars like a fill before the turnaround
+- **VARIATION:** how far each bar strays from the loop: skipped words, repeats, jumps ahead, words reversed, a word dropped a fifth, quiet ghost hits. Bars 4 and 8 stray most, and the 8 bars repeat, so it sounds composed
+
+**Feel** (Performance panel): **GATE** (how much of each step sounds), **SWING** (50–75%, off-steps late; straight grids only), **ACCENT** (beats loud, "and"s softer, 16ths softest; rolls build up), **SCREW DROP** (for Screwed).
+
+**SCHEME** (the order the slices come in):
+- **Phrase:** in order. The loop restarts on a bar line once it has had room for every slice, so a long phrase spans 2, 4 or 8 bars and always lands on the one
+- **Anchor:** the trigger slice on every beat like a kick, the rest of the phrase on the steps between
+- **Offbeat:** only the "and"s, as short stabs (FILL picks which ones)
+- **Rotate:** each bar starts one slice later, so the phrase slides across the downbeat
+- **Polymeter:** the loop ignores the bar: 3, 5 or 7 slices against 4/4, realigning every few bars
+- **Ping-pong:** forward, then back
+- **Call & answer:** the phrase, then the same number of bars answering with the trigger slice chopped
+- **Shuffle:** a new order each bar, the same 8 bars every time
+- **Screwed:** each slice over two steps, slowed and pitched down by SCREW DROP
+- **Build:** the division halves every bar (four times) for a roll into the drop; retrigger to restart
+
+Pattern hits start on each slice's first sound, so a word that opens with a pause still lands on its step. Everything is worked out from the song position, so the same bars of your arrangement always play the same way. DIVISION now defaults to 1/16. Sets saved before this rework open with the nearest scheme (Walk/Repeat/Stutter/Skip → Phrase, Ratchet → Build, Random → Shuffle).
+
+Pattern tour without Live: `DrosakaVoiceRender --pattern out.wav primary.wav others...` slices at word gaps and plays every scheme over a kick (`DV_NO_KICK=1` for none).
+
+### Pattern schemes test in Live
+
+1. Slice a phrase into words, PLAY → Pattern, LATCH on, hold C3. Automate **LENGTH** from 0 to 100% over 16 bars: the phrase should unfold word by word, always landing on the downbeat
+2. Pull **FILL** down to 3–7 of 16 with a kick running: does it groove?
+3. Try **Anchor** and **Offbeat** against a four-on-the-floor kick
+4. **STUTTER** up: are the rolls in the right places? Too many, too few?
+5. **VARIATION** at 30–60%: does bar 8 feel like a fill, and does the 8-bar block repeat?
+6. **SWING** and **ACCENT**: where do they sit best?
+7. Judgement calls: is **Call & answer** useful as it is? Should **Polymeter** count slices or steps? Any scheme you'd drop or add?
+
+### Milestone 8 behaviour (as built, patterns superseded by the schemes above)
 
 **Pattern mode** (PLAY → Pattern). One key starts a tempo-locked walk through the slices on the next grid line:
 - **Walk** plays one slice per step, in order
@@ -118,7 +156,6 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 
 **DEPTH** (Space strip, default 0 = pure panning) sends the outer voices back: up to −6 dB, 12 ms later, and into a shared reverb. The primary is never affected. Depth follows each voice's place in the crowd, not its moving pan, so Bounce and Orbit never bend pitch.
 
-Pattern tour without Live: `DrosakaVoiceRender --pattern out.wav primary.wav others...` slices at word gaps, then plays two bars of each pattern (four of Ratchet).
 
 ### Milestone 8 test in Live
 

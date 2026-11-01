@@ -1058,80 +1058,132 @@ int main()
 
     std::printf ("patterns (steps)\n");
     {
-        auto runSteps = [] (pattern::Params pp, int regions, int steps, std::vector<std::vector<pattern::Hit>>& out, pattern::State st = {})
+        // 16 steps of 1/16 per bar, from beat 0.
+        struct Run { pattern::State st; double ppq = 0.0; std::vector<std::vector<pattern::Hit>> v; };
+        auto go = [] (Run& r, const pattern::Params& pp, int regions, int steps)
         {
-            double ppq = st.startPpq;
             for (int k = 0; k < steps; ++k)
             {
                 pattern::Hit h[8]; int nh = 0;
-                const double len = pattern::nextStep (st, pp, regions, ppq, h, nh);
-                out.emplace_back (h, h + nh);
-                ppq += len;
+                const double len = pattern::nextStep (r.st, pp, regions, r.ppq, h, nh);
+                r.v.emplace_back (h, h + nh);
+                r.ppq += len;
             }
-            return st;
         };
-        auto slicesOf = [] (const std::vector<std::vector<pattern::Hit>>& v)
+        auto slicesOf = [] (const std::vector<std::vector<pattern::Hit>>& v, size_t from = 0, size_t to = 1u << 30)
         {
-            std::vector<int> r; for (auto& step : v) r.push_back (step.empty() ? -1 : step[0].slice); return r;
+            std::vector<int> r; for (size_t i = from; i < juce::jmin (to, v.size()); ++i) r.push_back (v[i].empty() ? -1 : v[i][0].slice); return r;
         };
-        pattern::Params pp; pp.division = 0.5;
-        std::vector<std::vector<pattern::Hit>> v;
+        using V = std::vector<int>;
+        pattern::Params base; base.division = 0.25;
 
-        pp.type = pattern::walk; runSteps (pp, 4, 6, v);
-        CHECK (slicesOf (v) == std::vector<int> ({ 0, 1, 2, 3, 0, 1 }), "Walk: one slice per step, in order, looping");
+        { Run r; auto pp = base; go (r, pp, 6, 20);
+          CHECK (slicesOf (r.v, 0, 8) == V ({ 0, 1, 2, 3, 4, 5, 0, 1 }), "Phrase: every slice in order, looping");
+          CHECK (r.v[15][0].slice == 3 && r.v[16][0].slice == 0, "Phrase: the loop restarts on the bar line"); }
 
-        v.clear(); pp.type = pattern::repeat; pp.repeats = 3; runSteps (pp, 3, 7, v);
-        CHECK (slicesOf (v) == std::vector<int> ({ 0, 0, 0, 1, 1, 1, 2 }), "Repeat: each slice N times, then on");
+        { Run r; r.st.start = 2; go (r, base, 6, 6);
+          CHECK (slicesOf (r.v) == V ({ 2, 3, 4, 5, 0, 1 }), "the trigger slice starts the loop, which runs on through every slice"); }
 
-        v.clear(); pp.type = pattern::stutter; pp.repeats = 4; runSteps (pp, 3, 3, v);
-        CHECK (v[0].size() == 1 && v[1].size() == 4 && v[1][3].offset == 0.375 && v[1][0].length == 0.125 && v[1][0].slice == 0 && v[2][0].slice == 1,
-               "Stutter: the slice, then N shorter retriggers of it, then on");
+        { Run r; auto pp = base; pp.length = 0.0f; go (r, pp, 6, 4);
+          CHECK (slicesOf (r.v) == V ({ 0, 0, 0, 0 }), "Length 0: the trigger slice on repeat");
+          Run r2; pp.length = 0.4f; go (r2, pp, 6, 7);
+          CHECK (slicesOf (r2.v) == V ({ 0, 1, 2, 0, 1, 2, 0 }), "Length 40% of 6 slices: a 3-slice loop"); }
 
-        v.clear(); pp.type = pattern::screwed; pp.drop = 7.0f; runSteps (pp, 2, 2, v);
-        CHECK (v[0][0].pitch == -7.0f && v[0][0].fit && v[1][0].slice == 1, "Screwed: pitched down by Drop, fitted to the step");
+        { Run r; auto pp = base; go (r, pp, 6, 8);
+          pp.length = 0.0f; go (r, pp, 6, 10);
+          CHECK (slicesOf (r.v, 8, 16) == V ({ 2, 3, 4, 5, 0, 1, 2, 3 }) && slicesOf (r.v, 16, 18) == V ({ 0, 0 }),
+                 "a Length change waits for the loop's restart (the next bar line)"); }
 
-        v.clear(); pp.type = pattern::skipRewind; pp.density = 0.0f; runSteps (pp, 4, 8, v);
-        CHECK (slicesOf (v) == std::vector<int> ({ 0, 1, 2, 3, 0, 1, 2, 3 }), "Skip/Rewind at density 0 = Walk");
-        v.clear(); pp.density = 1.0f; runSteps (pp, 4, 400, v);
-        int silent = 0, back = 0; int prev = -1;
-        for (size_t i = 0; i < v.size(); ++i)
-        {
-            if (v[i].empty()) ++silent;
-            else { if (prev >= 0 && v[i][0].slice == prev) ++back; prev = v[i][0].slice; }
-        }
-        std::printf ("       Skip/Rewind at full density over 400 steps: %d silent, %d rewinds\n", silent, back);
-        CHECK (silent > 150 && silent < 250 && back > 50, "Skip/Rewind at full density: about half the steps silent, the rest stepping back");
-        std::vector<std::vector<pattern::Hit>> v2; runSteps (pp, 4, 400, v2);
-        CHECK (slicesOf (v) == slicesOf (v2), "Skip/Rewind is repeatable (same pattern every time)");
+        { Run big; auto pl = base; pl.fill = 0.25f; go (big, pl, 8, 32);   // 4 hits a bar, 8 slices: a 2-bar loop
+          CHECK (slicesOf (big.v, 16, 17) == V ({ 4 }) && slicesOf (big.v, 32 - 16, 32 - 15) == V ({ 4 }), "a long phrase spans as many bars as it needs");
+          Run b2; go (b2, pl, 8, 48);
+          CHECK (b2.v[32][0].slice == 0, "and restarts on the bar after it ends"); }
 
-        v.clear(); pp.type = pattern::ratchet; pp.division = 0.5; runSteps (pp, 4, 30, v);
-        std::vector<double> lens; for (auto& step : v) lens.push_back (step[0].length);
-        CHECK (lens[0] == 0.5 && lens[7] == 0.5 && lens[8] == 0.25 && lens[23] == 0.25 && lens[24] == 0.125,
-               "Ratchet: the division halves every bar, accelerating");
+        { Run r; auto pp = base; pp.fill = 5.0f / 16.0f; go (r, pp, 8, 16);
+          std::vector<int> on; for (int i = 0; i < 16; ++i) if (! r.v[(size_t) i].empty()) on.push_back (i);
+          CHECK (on == V ({ 0, 4, 7, 10, 13 }), "Fill 5 of 16: hits spread evenly (Euclidean), first on the downbeat");
+          CHECK (slicesOf (r.v, 0, 16) == V ({ 0, -1, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1 }), "the phrase picks up where it left off on the next hit"); }
 
-        v.clear(); pp.type = pattern::random; pp.density = 1.0f; runSteps (pp, 5, 15, v);
-        bool perms = true, differs = false;
-        for (int c = 0; c < 3; ++c)
-        {
-            std::vector<int> cyc; for (int i = 0; i < 5; ++i) cyc.push_back (v[(size_t) (c * 5 + i)][0].slice);
-            auto sorted = cyc; std::sort (sorted.begin(), sorted.end());
-            perms &= sorted == std::vector<int> ({ 0, 1, 2, 3, 4 });
-            if (c > 0) for (int i = 0; i < 5; ++i) differs |= v[(size_t) (c * 5 + i)][0].slice != v[(size_t) i][0].slice;
-        }
-        CHECK (perms && differs, "Random: every slice once per pass, a new order each pass");
-        v.clear(); pp.density = 0.5f; runSteps (pp, 5, 400, v);
-        int fired = 0; for (auto& step : v) fired += step.empty() ? 0 : 1;
-        CHECK (fired > 160 && fired < 240, "Random density 50%: about half the steps fire");
+        { Run r; auto pp = base; pp.scheme = pattern::anchor; go (r, pp, 6, 16);
+          CHECK (slicesOf (r.v) == V ({ 0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 3, 4, 0, 5, 1, 2 }), "Anchor: the trigger slice on every beat, the phrase between"); }
 
-        v.clear(); pp.type = pattern::walk;
-        pattern::State st; st.slice = 0;
-        pattern::Hit h[8]; int nh = 0;
-        pattern::nextStep (st, pp, 6, 0.0, h, nh);
-        st.jump = 4;
-        pattern::nextStep (st, pp, 6, 0.5, h, nh);
-        const int jumped = h[0].slice;
-        pattern::nextStep (st, pp, 6, 1.0, h, nh);
-        CHECK (jumped == 4 && h[0].slice == 5, "a held slice key: the walk jumps there on the next step, then carries on");
+        { Run r; auto pp = base; pp.scheme = pattern::offbeat; go (r, pp, 6, 16);
+          std::vector<int> on; for (int i = 0; i < 16; ++i) if (! r.v[(size_t) i].empty()) on.push_back (i);
+          CHECK (on == V ({ 2, 6, 10, 14 }) && r.v[2][0].gate < 0.5f && r.v[2][0].length == 0.5 && slicesOf (r.v, 6, 7) == V ({ 1 }), "Offbeat: stabs on the \"and\"s (half an eighth long), in phrase order"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::rotate; go (r, pp, 4, 48);
+          CHECK (r.v[0][0].slice == 0 && r.v[16][0].slice == 1 && r.v[32][0].slice == 2, "Rotate: each bar starts one slice later"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::polymeter; go (r, pp, 3, 20);
+          CHECK (slicesOf (r.v, 14, 20) == V ({ 2, 0, 1, 2, 0, 1 }), "Polymeter: 3 slices cycle straight through the bar line"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::pingPong; go (r, pp, 4, 9);
+          CHECK (slicesOf (r.v) == V ({ 0, 1, 2, 3, 2, 1, 0, 1, 2 }), "Ping-pong: forward, then back"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::callAnswer; go (r, pp, 4, 32);
+          bool answer = true; for (int i = 16; i < 32; ++i) answer &= r.v[(size_t) i][0].slice == 0 && r.v[(size_t) i][0].gate <= 0.5f;
+          CHECK (slicesOf (r.v, 0, 5) == V ({ 0, 1, 2, 3, 0 }) && answer && r.v[17].size() >= 2, "Call & answer: the phrase, then a bar of the trigger slice, chopped"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::shuffle; go (r, pp, 5, 16 * 9);
+          auto first = slicesOf (r.v, 0, 5); auto sorted = first; std::sort (sorted.begin(), sorted.end());
+          CHECK (sorted == V ({ 0, 1, 2, 3, 4 }), "Shuffle: every slice once per pass");
+          CHECK (slicesOf (r.v, 16, 32) != slicesOf (r.v, 0, 16) && slicesOf (r.v, 128, 144) == slicesOf (r.v, 0, 16), "a new order each bar, the same 8 bars every time"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::screwed; pp.drop = 7.0f; go (r, pp, 3, 2);
+          CHECK (r.v[0][0].pitch == -7.0f && r.v[0][0].fit && r.v[0][0].length == 0.5 && r.v[1][0].slice == 1, "Screwed: two steps per slice, pitched down by Drop, fitted"); }
+
+        { Run r; auto pp = base; pp.scheme = pattern::build; pp.division = 0.5; go (r, pp, 4, 30);
+          CHECK (r.v[0][0].length == 0.5 && r.v[7][0].length == 0.5 && r.v[8][0].length == 0.25 && r.v[23][0].length == 0.25 && r.v[24][0].length == 0.125,
+                 "Build: the division halves every bar"); }
+
+        { Run r; auto pp = base; pp.stutter = 1.0f; go (r, pp, 4, 16 * 8);
+          int rollsIn[8] {}; bool sane = true;
+          for (int i = 0; i < 16 * 8; ++i)
+          {
+              const auto& st = r.v[(size_t) i];
+              if (st.size() < 2) continue;
+              ++rollsIn[i / 16];
+              double sum = 0; for (auto& h : st) { sum += h.length; sane &= h.slice == st[0].slice; }
+              sane &= std::abs (sum - 0.25) < 1e-9 && st.size() <= 6;
+          }
+          std::printf ("       Stutter 100%%, rolls per bar: %d %d %d %d %d %d %d %d\n", rollsIn[0], rollsIn[1], rollsIn[2], rollsIn[3], rollsIn[4], rollsIn[5], rollsIn[6], rollsIn[7]);
+          CHECK (sane, "Stutter: a roll is 2-6 retriggers of the same slice, filling its step");
+          CHECK (rollsIn[3] + rollsIn[7] > rollsIn[0] + rollsIn[1], "rolls gather toward the end of each 4 bars");
+          Run z; go (z, base, 4, 64); bool none = true; for (auto& st : z.v) none &= st.size() == 1; CHECK (none, "Stutter 0: no rolls"); }
+
+        { Run r; go (r, base, 4, 64);
+          CHECK (slicesOf (r.v, 0, 16) == slicesOf (r.v, 48, 64), "Variation 0: every bar the same");
+          Run w; auto pp = base; pp.variation = 1.0f; go (w, pp, 4, 16 * 16);
+          int changed[8] {}; int reversed = 0, ghosts = 0;
+          for (int i = 0; i < 16 * 8; ++i)
+          {
+              const auto& st = w.v[(size_t) i];
+              if (st.empty() || st[0].slice != i % 4 || std::abs (st[0].pitch) > 0 || st[0].reverse) ++changed[i / 16];
+              for (auto& h : st) { reversed += h.reverse; ghosts += h.gain < 0.5f; }
+          }
+          std::printf ("       Variation 100%%, changed steps per bar: %d %d %d %d %d %d %d %d (reversed %d)\n",
+                       changed[0], changed[1], changed[2], changed[3], changed[4], changed[5], changed[6], changed[7], reversed);
+          CHECK (changed[0] > 0 && changed[7] > changed[0] && reversed > 0, "Variation: bars stray from the loop, bar 8 the most, some slices backwards");
+          bool same = true;
+          for (int i = 0; i < 16 * 8; ++i) same &= slicesOf (w.v, (size_t) i, (size_t) i + 1) == slicesOf (w.v, (size_t) i + 128, (size_t) i + 129);
+          CHECK (same, "and the same 8 bars every time"); }
+
+        { Run r; auto pp = base; pp.swing = 1.0f; go (r, pp, 4, 4);
+          CHECK (r.v[0][0].offset == 0.0 && std::abs (r.v[1][0].offset - 0.125) < 1e-9 && std::abs (r.v[1][0].length - 0.125) < 1e-9,
+                 "Swing 75%: off-steps half a step late, still ending on time");
+          Run t; pp.division = 1.0 / 6.0; go (t, pp, 4, 4);
+          CHECK (t.v[1][0].offset == 0.0, "no swing on triplet grids"); }
+
+        { Run r; auto pp = base; pp.accent = 1.0f; go (r, pp, 4, 4);
+          CHECK (r.v[0][0].gain == 1.0f && std::abs (r.v[2][0].gain - 0.7f) < 1e-6f && std::abs (r.v[1][0].gain - 0.45f) < 1e-6f,
+                 "Accent: beats full, \"and\"s softer, 16ths softest"); }
+
+        { Run r; go (r, base, 6, 1);
+          r.st.jump = 4; go (r, base, 6, 2);
+          CHECK (slicesOf (r.v) == V ({ 0, 4, 5 }), "a held slice key: the loop restarts there on the next step"); }
+
+        CHECK (pattern::schemeFromOldType (5) == pattern::build && pattern::schemeFromOldType (6) == pattern::shuffle && pattern::schemeFromOldType (3) == pattern::screwed,
+               "old pattern types map to the nearest scheme");
     }
 
     std::printf ("patterns (engine)\n");
@@ -1144,7 +1196,7 @@ int main()
         juce::StringArray errs; p.addStems ({ fA.getFullPathName(), fB.getFullPathName() }, errs);
         p.addSlice (0.4); p.addSlice (0.8); p.addSlice (1.2);
         auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
-        set ("playMode", 1.0f); set ("patternType", 0.0f); set ("patternDiv", 1.0f); set ("gate", 0.5f);   // Walk, 1/8, half-length hits
+        set ("playMode", 1.0f); set ("scheme", 0.0f); set ("patternDiv", 1.0f); set ("gate", 0.5f);   // Phrase, 1/8, half-length hits
         const double spb = rate * 60.0 / ph.bpm;
         const int L = p.getLatencySamples();
 
@@ -1181,7 +1233,7 @@ int main()
             ++total;
             if (energy (out, at + 100, 2400) > 0.02f && energy (out, at - 3000, 2400) < 0.002f) ++onTime;
         }
-        std::printf ("       Walk 1/8: %d of %d hits start exactly on their grid line\n", onTime, total);
+        std::printf ("       Phrase 1/8: %d of %d hits start exactly on their grid line\n", onTime, total);
         CHECK (onTime == total, "hits land on the 1/8 grid, with silence between them (Gate 50%)");
         const int releaseAt = 400 * 256 + 37;
         CHECK (energy (out, releaseAt + L + (int) (0.5 * spb) + 2000, 20000) < 1e-3f, "releasing the key stops the walk");
@@ -1205,7 +1257,7 @@ int main()
         CHECK (sliceAfterJump == 2 || sliceAfterJump == 3, "holding a slice key mid-walk jumps the walk to it");
 
         // Screwed: the same slices, pitched down by Drop and fitted to the step.
-        set ("patternType", 3.0f); set ("dropSemis", 7.0f); set ("gate", 1.0f); set ("patternDiv", 0.0f);   // 1/4 steps: 0.5 s
+        set ("scheme", (float) pattern::screwed); set ("dropSemis", 7.0f); set ("gate", 1.0f); set ("patternDiv", 0.0f);   // 1/4 steps: 0.5 s
         p.setSolo (0, true);   // one voice, so the pitch is measurable
         auto scr = perform (500, { { 5, 48, true } });
         perform (20, { { 0, 48, false } });
@@ -1218,13 +1270,60 @@ int main()
         bool finite = true; for (int i = 0; i < scr.getNumSamples(); ++i) finite &= std::isfinite (scr.getSample (0, i));
         CHECK (finite, "stretched hits stay finite");
 
+        // Everything on: rolls, variation (reversed slices), swing, accent. Stays sane.
+        set ("scheme", (float) pattern::anchor); set ("patternDiv", 2.0f); set ("stutter", 1.0f); set ("variation", 1.0f);
+        set ("swing", 0.6f); set ("accent", 0.8f); set ("dropSemis", 5.0f);
+        auto wild = perform (1500, { { 5, 48, true } });
+        perform (20, { { 0, 48, false } });
+        bool wildFinite = true; float wildPeak = 0.0f;
+        for (int i = 0; i < wild.getNumSamples(); ++i) { wildFinite &= std::isfinite (wild.getSample (0, i)); wildPeak = juce::jmax (wildPeak, std::abs (wild.getSample (0, i))); }
+        std::printf ("       all macros up: peak %.2f\n", wildPeak);
+        CHECK (wildFinite && wildPeak > 0.05f && wildPeak < 1.5f, "all macros up (rolls, reversed slices, swing, accent): sound, finite, no blow-ups");
+        set ("stutter", 0.0f); set ("variation", 0.0f); set ("swing", 0.0f); set ("accent", 0.0f); set ("patternDiv", 0.0f);
+
         // Stretch: a 0.4 s slice in a 0.5 s step at Gate 100% fills the step.
-        set ("patternType", 0.0f);
+        set ("scheme", 0.0f);
         auto fill = perform (500, { { 5, 48, true } });
         perform (20, { { 0, 48, false } });
         int gaps = 0;
         for (int i = 40000; i + 1200 < 100000; i += 1200) if (energy (fill, i, 1200) < 0.002f) ++gaps;
         CHECK (gaps <= 2, "a slice shorter than its step is stretched to fill it");
+        // A phrase that opens with a pause: hits start on its first sound, so stabs speak.
+        {
+            auto t = voiceTone (150.0f, 0.4f, rate, (int) (rate * 1.5));
+            for (int i = 0; i < (int) (rate * 0.3); ++i) t.setSample (0, i, 0.0f);
+            auto fq = writeWav ("pt_pause.wav", t, rate);
+            DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256);
+            TestPlayHead qh; qh.bpm = 120.0; qh.ppq = 0.0; q.setPlayHead (&qh);
+            juce::StringArray e2; q.addStems ({ fq.getFullPathName() }, e2);
+            auto setq = [&] (const char* id, float v) { auto* prm = q.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+            setq ("playMode", 1.0f); setq ("scheme", (float) pattern::offbeat); setq ("patternDiv", 2.0f); setq ("latch", 1.0f);
+            juce::AudioBuffer<float> o (2, 256 * 400), blk (2, 256);
+            for (int k = 0; k < 400; ++k)
+            {
+                juce::MidiBuffer m; if (k == 2) m.addEvent (juce::MidiMessage::noteOn (1, 48, (juce::uint8) 100), 0);
+                q.processBlock (blk, m); qh.ppq += 256.0 / spb;
+                for (int ch = 0; ch < 2; ++ch) o.copyFrom (ch, k * 256, blk, ch, 0, 256);
+            }
+            const int stab = (int) std::round (2.5 * spb) + q.getLatencySamples();   // the "and" of beat 3
+            const float e = energy (o, stab + 200, 1800);
+            std::printf ("       offbeat stab from a phrase with a 300 ms pause: level %.3f\n", e);
+            CHECK (e > 0.05f, "pattern hits skip a slice's opening pause (stabs still speak)");
+            q.setPlayHead (nullptr);
+        }
+
+        // A set saved before the rework: its "patternType" becomes the nearest scheme.
+        {
+            juce::MemoryBlock mb; p.getStateInformation (mb);
+            auto tree = juce::ValueTree::readFromData (static_cast<const char*> (mb.getData()) + 4, mb.getSize() - 4);
+            auto pt = tree.getChildWithName (p.params.state.getType());
+            pt.removeChild (pt.getChildWithProperty ("id", "scheme"), nullptr);
+            juce::ValueTree old ("PARAM"); old.setProperty ("id", "patternType", nullptr); old.setProperty ("value", 5, nullptr);   // Ratchet
+            pt.appendChild (old, nullptr);
+            juce::MemoryOutputStream mos; mos.write (mb.getData(), 4); tree.writeToStream (mos);
+            DrosakaVoiceProcessor q; q.setStateInformation (mos.getData(), (int) mos.getDataSize());
+            CHECK ((int) q.params.getRawParameterValue ("scheme")->load() == pattern::build, "old sets: Ratchet comes back as Build");
+        }
         p.setPlayHead (nullptr);
         (void) jumpRun; (void) latched;
     }
@@ -1334,10 +1433,10 @@ int main()
         cc (21, 0);
         CHECK (p.params.getParameter ("spread")->getValue() < 1e-6f, "both ways");
 
-        p.armMidiLearn ("patternType");   // a stepped knob
+        p.armMidiLearn ("scheme");   // a stepped knob
         cc (22, 0);
         cc (22, 127);
-        CHECK ((int) p.params.getRawParameterValue ("patternType")->load() == 6, "stepped knobs step through their choices");
+        CHECK ((int) p.params.getRawParameterValue ("scheme")->load() == pattern::numSchemes - 1, "stepped knobs step through their choices");
 
         p.armMidiLearn ("spread");
         cc (30, 10);
@@ -1347,7 +1446,7 @@ int main()
 
         juce::MemoryBlock mb; p.getStateInformation (mb);
         DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
-        CHECK (q.getCcFor ("spread") == 30 && q.getCcFor ("patternType") == 22, "mappings save with the set");
+        CHECK (q.getCcFor ("spread") == 30 && q.getCcFor ("scheme") == 22, "mappings save with the set");
         p.forgetCc ("spread");
         CHECK (p.getCcFor ("spread") == -1, "Forget removes a mapping");
     }

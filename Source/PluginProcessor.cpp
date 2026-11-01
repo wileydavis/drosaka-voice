@@ -50,11 +50,15 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     snapParam = params.getRawParameterValue ("snap");
     spatialParam = params.getRawParameterValue ("spatialMode");
     playModeParam = params.getRawParameterValue ("playMode");
-    patternTypeParam = params.getRawParameterValue ("patternType");
+    schemeParam = params.getRawParameterValue ("scheme");
+    lengthParam = params.getRawParameterValue ("phraseLength");
+    fillParam = params.getRawParameterValue ("fill");
+    stutterParam = params.getRawParameterValue ("stutter");
+    variationParam = params.getRawParameterValue ("variation");
+    swingParam = params.getRawParameterValue ("swing");
+    accentParam = params.getRawParameterValue ("accent");
     patternDivParam = params.getRawParameterValue ("patternDiv");
     gateParam = params.getRawParameterValue ("gate");
-    densityParam = params.getRawParameterValue ("density");
-    repeatsParam = params.getRawParameterValue ("repeats");
     dropSemisParam = params.getRawParameterValue ("dropSemis");
     latchParam = params.getRawParameterValue ("latch");
     dropParam = params.getRawParameterValue ("drop");
@@ -113,13 +117,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
 
     // Pattern mode.
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "playMode", 1 }, "Play mode", juce::StringArray { "Manual", "Pattern" }, 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternType", 1 }, "Pattern", pattern::typeNames(), 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternDiv", 1 }, "Division", pattern::divisionNames(), 1));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "scheme", 1 }, "Scheme", pattern::schemeNames(), 0));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternDiv", 1 }, "Division", pattern::divisionNames(), 2));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "phraseLength", 1 }, "Phrase length",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f, pct));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "fill", 1 }, "Fill",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f, pct));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "stutter", 1 }, "Stutter",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "variation", 1 }, "Variation",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "swing", 1 }, "Swing",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (50.0f + 25.0f * v)) + "%"; })));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "accent", 1 }, "Accent",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "gate", 1 }, "Gate",
         juce::NormalisableRange<float> (0.05f, 1.0f), 0.9f, pct));
-    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "density", 1 }, "Density",
-        juce::NormalisableRange<float> (0.0f, 1.0f), 0.75f, pct));
-    layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { "repeats", 1 }, "Repeat count", 1, 8, 3));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "dropSemis", 1 }, "Screwed drop",
         juce::NormalisableRange<float> (0.0f, 12.0f), 5.0f,
         juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1) + " st"; })));
@@ -492,7 +506,7 @@ void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
 }
 
 //==============================================================================
-void DrosakaVoiceProcessor::startInstance (double startPos, double lengthOut, double speed, float pitchSemis)
+void DrosakaVoiceProcessor::startInstance (double startPos, double lengthOut, double speed, float pitchSemis, float gain)
 {
     auto& prev = instances[current];
     if (prev.active)
@@ -508,6 +522,7 @@ void DrosakaVoiceProcessor::startInstance (double startPos, double lengthOut, do
     in.speed = speed;
     in.stopOut = lengthOut;
     in.pitchSemis = pitchSemis;
+    in.gain = gain;
     in.releasing = false;
     in.env = 0.0f;
     in.envTarget = 1.0f;
@@ -528,7 +543,7 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const bool* 
 
         // A stretched or pitched hit (pattern mode) can't use direct playback: it goes
         // through PSOLA, which changes pitch and time independently.
-        const bool forced = std::abs (in.speed - 1.0) > 1e-6 || std::abs (in.pitchSemis) > 1e-4f;
+        const bool forced = std::abs (std::abs (in.speed) - 1.0) > 1e-6 || std::abs (in.pitchSemis) > 1e-4f;   // reversed (-1) reads directly
         const float instRatio = std::exp2 (in.pitchSemis / 12.0f);
 
         // The instance envelope for this segment, shared by every voice. A hit ends with
@@ -541,7 +556,7 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const bool* 
                 in.envTarget = 0.0f;
                 in.envStep = -juce::jmax (in.env, 1e-3f) / (float) fadeSamples;
             }
-            envBuf[j] = in.env;
+            envBuf[j] = in.env * in.gain;
             if (! juce::exactlyEqual (in.envStep, 0.0f))
             {
                 in.env += in.envStep;
@@ -638,7 +653,7 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const bool* 
 
         in.out += num;
         const double phraseNow = in.startPos + in.out * in.speed;
-        if ((juce::exactlyEqual (in.envStep, 0.0f) && in.env <= 0.0f) || phraseNow >= phraseLen) in.active = false;
+        if ((juce::exactlyEqual (in.envStep, 0.0f) && in.env <= 0.0f) || phraseNow >= phraseLen || phraseNow < 0.0) in.active = false;
     }
 }
 
@@ -665,8 +680,8 @@ void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double pp
             // Start on the next grid line, from the slice played (or the top).
             const double div = pattern::divisionBeats ((int) patternDivParam->load());
             patternState = {};
-            patternState.slice = sliceKey ? k : 0;
-            lastPatternType = juce::jlimit (0, 6, (int) patternTypeParam->load());
+            patternState.start = sliceKey ? k : 0;
+            lastPatternType = juce::jlimit (0, pattern::numSchemes - 1, (int) schemeParam->load());
             nextStepPpq = std::ceil (ppqAt / div - 1e-9) * div;
             patternState.startPpq = nextStepPpq;
             numPending = 0;
@@ -674,7 +689,7 @@ void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double pp
         }
         else if (sliceKey)
         {
-            // Holding a slice key: the walk goes there on the next step. (Steps are only
+            // Holding a slice key: the loop restarts there on the next step. (Steps are only
             // planned ~10 ms ahead, so 'next step' really is the next one.)
             patternState.jump = k;
         }
@@ -694,13 +709,57 @@ void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double pp
     }
 }
 
+// Narrows [a, z) (phrase seconds) to where the primary voice is sounding: leading and trailing
+// stretches more than 30 dB under the stem's peak are skipped, keeping 5 ms before the sound,
+// and never more than 60% of the slice.
+void DrosakaVoiceProcessor::trimToSound (const Bank& b, double& a, double& z)
+{
+    if (b.size() == 0 || z - a < 0.03) return;
+    const auto& st = *b.stems[(size_t) juce::jlimit (0, b.size() - 1, b.primary)];
+    const auto* x = st.audio.getReadPointer (0);
+    const int len = st.audio.getNumSamples();
+    const double off = b.flags[(size_t) b.primary].offsetSec;
+    const int win = juce::jmax (1, (int) (0.005 * st.sampleRate));
+    float peak = 0.0f;
+    for (float v : st.peaks) peak = juce::jmax (peak, std::abs (v));
+    const float thresh = juce::jmax (1e-5f, peak * 0.0316f);
+    auto loud = [&] (double t)
+    {
+        const int i0 = (int) ((t - off) * st.sampleRate);
+        if (i0 < 0 || i0 + win > len) return false;
+        float m = 0.0f;
+        for (int i = i0; i < i0 + win; ++i) m = juce::jmax (m, std::abs (x[i]));
+        return m > thresh;
+    };
+    const double maxTrim = (z - a) * 0.6, step = 0.005;
+    double na = a, nz = z;
+    while (na - a < maxTrim && ! loud (na)) na += step;
+    if (na - a >= maxTrim) return;   // no clear sound: leave the slice alone
+    na = juce::jmax (a, na - 0.005);
+    while (z - nz < maxTrim && nz - step > na && ! loud (nz - step)) nz -= step;
+    a = na;
+    z = juce::jmin (z, nz + 0.005);
+}
+
 void DrosakaVoiceProcessor::fireHit (const pattern::Hit& h, const Bank& b, double bpm)
 {
     double a = 0.0, z = b.lengthSeconds();
     if (liveSlices.numRegions() > 0) liveSlices.region (Bank::sliceRoot + h.slice, b.lengthSeconds(), a, z);
+    // Start on the slice's first sound (and end on its last), so stabs and chops of a slice
+    // that opens with a pause still speak, and every hit lands on its grid line.
+    trimToSound (b, a, z);
     const double sliceSec = juce::jmax (0.01, z - a);
     const double stepSec = h.length * 60.0 / bpm;
-    const double gate = gateParam->load();
+    const double gate = gateParam->load() * h.gate;
+
+    if (h.reverse)
+    {
+        // Backwards from the slice's end, at its own speed, cut to the step.
+        const double playSec = juce::jmax (0.02, juce::jmin (stepSec * gate, sliceSec));
+        startInstance (z * hostRate, playSec * hostRate, -1.0, h.pitch, h.gain);
+        patternSlice = h.slice;
+        return;
+    }
 
     // Fit the slice to its step: stretch short ones (up to 2x), truncate long ones;
     // Screwed fits exactly (and is pitched down).
@@ -709,7 +768,7 @@ void DrosakaVoiceProcessor::fireHit (const pattern::Hit& h, const Bank& b, doubl
     else if (sliceSec < stepSec) speed = juce::jmax (0.5, sliceSec / stepSec);
     const double playSec = juce::jmax (0.02, juce::jmin (stepSec * gate, sliceSec / speed));
 
-    startInstance (a * hostRate, playSec * hostRate, speed, h.pitch);
+    startInstance (a * hostRate, playSec * hostRate, speed, h.pitch, h.gain);
     patternSlice = h.slice;
 }
 
@@ -995,15 +1054,19 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (patternRunning)
             {
                 pattern::Params pp;
-                pp.type = juce::jlimit (0, 6, (int) patternTypeParam->load());
+                pp.scheme = juce::jlimit (0, pattern::numSchemes - 1, (int) schemeParam->load());
                 pp.division = pattern::divisionBeats ((int) patternDivParam->load());
-                pp.density = densityParam->load();
-                pp.repeats = (int) repeatsParam->load();
+                pp.length = lengthParam->load();
+                pp.fill = fillParam->load();
+                pp.stutter = stutterParam->load();
+                pp.variation = variationParam->load();
+                pp.swing = swingParam->load();
+                pp.accent = accentParam->load();
                 pp.drop = dropSemisParam->load();
-                // A new pattern starts its own count (Ratchet accelerates from where you switch to it).
-                if (pp.type != lastPatternType)
+                // A new scheme starts its own count (Build accelerates from where you switch to it).
+                if (pp.scheme != lastPatternType)
                 {
-                    lastPatternType = pp.type;
+                    lastPatternType = pp.scheme;
                     patternState.step = 0;
                     patternState.startPpq = nextStepPpq;
                 }
@@ -1289,6 +1352,17 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             if (id.startsWith ("slice") && ! id.startsWith ("sliceOffset"))
                 if (const double v = (double) c.getProperty ("value", 0.0); v > 0.002 && v < 0.998) oldShares.push_back (v);
         }
+    // Builds before the Nov 1 pattern rework stored "patternType": map it to a scheme.
+    if (p.isValid())
+        for (auto c : p)
+            if (c.getProperty ("id").toString() == "patternType" && ! p.getChildWithProperty ("id", "scheme").isValid())
+            {
+                juce::ValueTree sc ("PARAM");
+                sc.setProperty ("id", "scheme", nullptr);
+                sc.setProperty ("value", pattern::schemeFromOldType ((int) c.getProperty ("value", 0)), nullptr);
+                p.appendChild (sc, nullptr);
+                break;
+            }
     if (p.isValid()) params.replaceState (p);
 
     for (auto& c : ccToParam) c = -1;
