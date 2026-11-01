@@ -233,6 +233,10 @@ private:
     bool held[128] {};
     void patternNote (const juce::MidiMessage&, double ppqAtEvent, const Bank&);
     SliceSet liveSlices;   // audio thread: the markers as of this block
+    tune::Spec liveTune;   // audio thread: autotune as of this block
+    std::atomic<float>* tuneAmountParam = nullptr;
+    std::atomic<float>* tuneRootParam = nullptr;
+    std::atomic<float>* tuneScaleParam = nullptr;
     std::atomic<float>* sliceParams[SliceSet::maxMarkers] {};
     void setSliceParam (int slot, float normalised);
     void fireHit (const pattern::Hit&, const Bank&, double bpm);

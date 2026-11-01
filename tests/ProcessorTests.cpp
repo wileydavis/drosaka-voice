@@ -1,5 +1,6 @@
 // Offline checks of the processor (no host needed). Build with -DDV_BUILD_TESTS=ON.
 #include "../Source/PluginProcessor.h"
+#include "../Source/Tune.h"
 #include <cstdio>
 #include <algorithm>
 
@@ -1290,6 +1291,92 @@ int main()
         juce::MemoryBlock omb; juce::AudioProcessor::copyXmlToBinary (*old.createXml(), omb);
         DrosakaVoiceProcessor o; o.setStateInformation (omb.getData(), (int) omb.getSize());
         CHECK (near (sliceTimes (o), { 0.4, 1.2 }), "older sets' markers become marker parameters");
+    }
+
+
+    std::printf ("autotune\n");
+    {
+        // Targets.
+        CHECK (std::abs (tune::target (155.0f, 0, tune::root, 140.0f) - 130.81f) < 0.1f, "Root C: a voice centred at 140 Hz sits on C3 (130.8)");
+        CHECK (std::abs (tune::target (155.0f, 0, tune::root, 300.0f) - 261.63f) < 0.1f, "Root keeps each voice in its own octave");
+        CHECK (std::abs (tune::target (450.0f, 9, tune::minor, 0) - 440.0f) < 0.1f && std::abs (tune::target (480.0f, 9, tune::minor, 0) - 493.88f) < 0.2f,
+               "Minor on A snaps to A and B");
+        CHECK (std::abs (tune::target (300.0f, 0, tune::major, 0) - 293.66f) < 0.2f && std::abs (tune::target (250.0f, 0, tune::major, 0) - 246.94f) < 0.2f,
+               "Major on C snaps to D and B");
+        CHECK (tune::ratio (150.0f, 0.0f, 0, tune::root, 150.0f) == 1.0f, "Tune 0 = untouched");
+
+        // A wobbly, gliding voice: 150 Hz with +-1 st vibrato at 5 Hz plus a slow 2 st rise.
+        const int len = (int) (rate * 3.0);
+        juce::AudioBuffer<float> wob (1, len); wob.clear();
+        double ph = 0.0;
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / rate;
+            const double f = 150.0 * std::exp2 ((std::sin (juce::MathConstants<double>::twoPi * 5.0 * t) + 2.0 * t / 3.0) / 12.0);
+            ph += f / rate;
+            float x = 0.0f;
+            for (int h = 1; h < 25; ++h) x += 0.08f / (float) h * (float) std::sin (juce::MathConstants<double>::twoPi * h * ph);
+            wob.setSample (0, i, x);
+        }
+        auto fW = writeWav ("wobble.wav", wob, rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fW.getFullPathName() }, errs);
+        auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+
+        auto trackCents = [&] (float targetHz, float& meanAbs, float& spread)
+        {
+            run (p, 256, 800, {});
+            auto out = run (p, 256, 560, { 0 });
+            std::vector<float> cents;
+            for (int a0 = 12000; a0 + 7200 < 256 * 560 - 4000; a0 += 4800)
+            {
+                std::vector<float> m (7200);
+                for (int i = 0; i < 7200; ++i) m[(size_t) i] = out.getSample (0, a0 + i);
+                const float hz = analyseStem (m.data(), 7200, rate).pitchHz;
+                if (hz > 0) cents.push_back (1200.0f * std::log2 (hz / targetHz));
+            }
+            float mean = 0, lo = 1e9, hi = -1e9;
+            for (auto c : cents) { mean += std::abs (c); lo = juce::jmin (lo, c); hi = juce::jmax (hi, c); }
+            meanAbs = cents.empty() ? 1e9f : mean / (float) cents.size();
+            spread = hi - lo;
+        };
+        float m0, s0, m1, s1, mh, sh;
+        trackCents (130.81f, m0, s0);
+        set ("tuneAmount", 1.0f); set ("tuneRoot", 0.0f); set ("tuneScale", 0.0f);
+        trackCents (130.81f, m1, s1);
+        set ("tuneAmount", 0.5f);
+        trackCents (130.81f, mh, sh);
+        std::printf ("       pitch spread across the phrase: untuned %.0f cents, Tune 50%% %.0f, Tune 100%% %.0f (avg %.0f cents off C3)\n", s0, sh, s1, m1);
+        CHECK (s1 < 40.0f && m1 < 25.0f, "Tune 100% Root: the wobbling voice holds on the root");
+        CHECK (sh < s0 * 0.75f && sh > s1, "Tune 50% pulls part of the way");
+
+        // Minor: notes land on scale degrees.
+        set ("tuneAmount", 1.0f); set ("tuneScale", 1.0f); set ("tuneRoot", 9.0f);   // A minor
+        run (p, 256, 800, {});
+        auto out = run (p, 256, 560, { 0 });
+        int onScale = 0, total = 0;
+        for (int a0 = 12000; a0 + 7200 < 256 * 560 - 4000; a0 += 4800)
+        {
+            std::vector<float> m (7200);
+            for (int i = 0; i < 7200; ++i) m[(size_t) i] = out.getSample (0, a0 + i);
+            const float hz = analyseStem (m.data(), 7200, rate).pitchHz;
+            if (hz <= 0) continue;
+            ++total;
+            const float semis = 12.0f * std::log2 (hz / 440.0f);
+            const float within = semis - 12.0f * std::floor (semis / 12.0f);
+            const int steps[] = { 0, 2, 3, 5, 7, 8, 10, 12 };
+            float best = 99; for (int st : steps) best = juce::jmin (best, std::abs (within - (float) st));
+            if (best < 0.35f) ++onScale;
+        }
+        std::printf ("       A minor: %d of %d windows on a scale note\n", onScale, total);
+        CHECK (total > 10 && onScale >= total * 8 / 10, "Tune Minor: the voice lands on A-minor notes");
+
+        // Encoded voice: the codec retunes too.
+        set ("tuneScale", 0.0f); set ("tuneRoot", 0.0f); set ("encodeCount", 1.0f);
+        float mc, sc;
+        trackCents (130.81f, mc, sc);
+        std::printf ("       encoded, Tune 100%% Root: spread %.0f cents, avg %.0f off C3\n", sc, mc);
+        CHECK (sc < 60.0f && mc < 40.0f, "encoded voices are retuned by the codec");
     }
 
     std::printf ("milestone 1 sets still open\n");

@@ -36,6 +36,9 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     countParam = params.getRawParameterValue ("count");
     encodeParam = params.getRawParameterValue ("encodeCount");
     for (int i = 0; i < SliceSet::maxMarkers; ++i) sliceParams[i] = params.getRawParameterValue ("slice" + juce::String (i + 1));
+    tuneAmountParam = params.getRawParameterValue ("tuneAmount");
+    tuneRootParam = params.getRawParameterValue ("tuneRoot");
+    tuneScaleParam = params.getRawParameterValue ("tuneScale");
     spreadParam = params.getRawParameterValue ("spread");
     chordParam = params.getRawParameterValue ("chord");
     snapParam = params.getRawParameterValue ("snap");
@@ -121,6 +124,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keepHuman", 1 }, "Keep primary human", false));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "depth", 1 }, "Depth",
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, pct));
+
+    // Autotune.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "tuneAmount", 1 }, "Tune",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+            { return v <= 0.001f ? juce::String ("off") : juce::String (juce::roundToInt (v * 100.0f)) + "%"; })));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneRoot", 1 }, "Tune root", tune::rootNames(), 0));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneScale", 1 }, "Tune scale", tune::scaleNames(), 0));
 
     // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
@@ -497,7 +508,9 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
             };
 
             // PSOLA at output time o (samples since the hit), one grain per synthesis pitch mark.
-            auto psola = [&] (Psola& ps, double o, float ratio) -> float
+            const float centre = st.analysis.pitchHz;
+            const bool tuneThis = liveTune.amount > 0.001f;
+            auto psola = [&] (Psola& ps, double o, float ratio, bool applyTune) -> float
             {
                 while (ps.nextSynth <= o + lookahead)
                 {
@@ -511,7 +524,9 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
                     if (idx > 0 && std::abs (mk.pos[idx - 1] - srcTime) < std::abs (mk.pos[idx] - srcTime)) --idx;
 
                     const bool voiced = mk.voiced[idx] != 0;
-                    const float r = voiced ? ratio : 1.0f;
+                    float r = voiced ? ratio : 1.0f;
+                    if (voiced && applyTune && tuneThis)   // autotune each period toward its target
+                        r *= tune::ratio ((float) (st.sampleRate / mk.period[idx]), liveTune.amount, liveTune.pitchClass, liveTune.scale, centre);
                     const double half = mk.period[idx] / step;   // one period, in host samples
 
                     if (ps.count == 8) { for (int k = 1; k < 8; ++k) ps.grains[k - 1] = ps.grains[k]; ps.count = 7; }
@@ -547,14 +562,14 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
                 if (! forced || ! canPsola)
                 {
                     if (g > 0.0f) dst[j] += g * read (pos);
-                    if (wantPsola[s] && canPsola) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s]);
+                    if (wantPsola[s] && canPsola) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s], true);
                 }
                 else
                 {
                     // dryBuf (which also feeds the codec) carries the hit's own pitch and time;
                     // shiftBuf adds Spread on top.
-                    dst[j] += g * psola (in.psolaRaw[s], o, instRatio);
-                    if (wantPsola[s]) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s] * instRatio);
+                    dst[j] += g * psola (in.psolaRaw[s], o, instRatio, false);   // the codec's feed: it retunes itself
+                    if (wantPsola[s]) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s] * instRatio, true);
                 }
             }
         }
@@ -651,6 +666,10 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         for (int i = 0; i < SliceSet::maxMarkers; ++i) pos[i] = sliceParams[i]->load();
         liveSlices = SliceSet::fromPositions (pos, b.lengthSeconds());
     }
+    liveTune.amount = tuneAmountParam->load();
+    liveTune.pitchClass = juce::jlimit (0, 11, (int) tuneRootParam->load());
+    liveTune.scale = juce::jlimit (0, 2, (int) tuneScaleParam->load());
+    const bool tuneOn = liveTune.amount > 0.001f;
 
     // Crowd targets for this block (encode and pans are per chunk: they follow the grid).
     float tg[maxVoices], tpRadiate[maxVoices], tp[maxVoices], te[maxVoices];
@@ -848,13 +867,14 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             auto& vd = voiceDsp[s];
             vd.drySemis = approach (vd.drySemis, tDrySemis[s], semiStep);
             vd.codecSemis = approach (vd.codecSemis, tCodecSemis[s], semiStep);
-            const float mixTarget = std::abs (tDrySemis[s]) > 0.005f || std::abs (vd.drySemis) > 0.005f ? 1.0f : 0.0f;
+            const float mixTarget = tuneOn || std::abs (tDrySemis[s]) > 0.005f || std::abs (vd.drySemis) > 0.005f ? 1.0f : 0.0f;
             mix0[s] = vd.psolaMix;
             vd.psolaMix = approach (vd.psolaMix, mixTarget, mixStep);
             mix1[s] = vd.psolaMix;
             wantPsola[s] = mix0[s] > 0.0f || mix1[s] > 0.0f;
             psolaRatio[s] = std::exp2 (vd.drySemis / 12.0f);
             vd.codec.setPitchRatio (std::exp2 (vd.codecSemis / 12.0f));
+            vd.codec.setTune (liveTune, b.stems[(size_t) s]->analysis.pitchHz);
         }
 
         // Dry voices, with sample-accurate triggers inside this chunk.
