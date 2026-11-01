@@ -43,6 +43,10 @@ target_compile_definitions(DrosakaVoice PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
+    # Off: JUCE would add 2,080 hidden 'MIDI CC' parameters to the VST3, which pushes it far
+    # past Live's 64-parameter auto-list limit, so Live only shows the last-touched parameter.
+    # (Cost: the VST3 can't receive MIDI CCs for the built-in learn; Live's MIDI Map works.)
+    JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0
     JUCE_DISPLAY_SPLASH_SCREEN=0)
 
 target_link_libraries(DrosakaVoice

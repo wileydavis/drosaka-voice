@@ -142,9 +142,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "record", 1 }, "Record take", false));
 
     // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
+    // Named for the key whose slice each one starts: marker 1 starts C#3, marker 15 starts D#4.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
-            juce::ParameterID { "slice" + juce::String (i), 1 }, "Slice marker " + juce::String (i),
+            juce::ParameterID { "slice" + juce::String (i), 1 },
+            "Slice " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " start",
             juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
             juce::AudioParameterFloatAttributes().withStringFromValueFunction (
                 [] (float v, int) { return v <= 0.002f ? juce::String ("off") : juce::String (v * 100.0f, 1) + "%"; })));
@@ -153,13 +155,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
 
 bool DrosakaVoiceProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
+    // Stereo out. Any input layout a host asks for is fine (disabled, mono or stereo, main or
+    // sidechain): inputs are only ever recorded, never heard, so we take audio wherever it arrives.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
-    if (! layouts.getMainInputChannelSet().isDisabled()) return false;
-    if (layouts.inputBuses.size() > 1)
-    {
-        const auto sc = layouts.inputBuses[1];
-        if (! (sc.isDisabled() || sc == juce::AudioChannelSet::mono() || sc == juce::AudioChannelSet::stereo())) return false;
-    }
+    for (const auto& in : layouts.inputBuses)
+        if (! (in.isDisabled() || in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo())) return false;
     return true;
 }
 
@@ -408,14 +408,28 @@ void DrosakaVoiceProcessor::setSliceParam (int slot, float v)
     prm->endChangeGesture();
 }
 
+// Markers are kept packed and in time order across slots 1..n, so every marker parameter
+// keeps meaning the same note (slot k = where C3 + k starts). Edits re-pack the slots.
+void DrosakaVoiceProcessor::writeSlices (const std::vector<double>& times)
+{
+    const double len = getBank()->lengthSeconds();
+    for (int slot = 0; slot < SliceSet::maxMarkers; ++slot)
+    {
+        const float v = slot < (int) times.size() && len > 0.0 ? (float) (times[(size_t) slot] / len) : 0.0f;
+        if (std::abs (sliceParams[slot]->load() - v) > 1e-7f) setSliceParam (slot, v);
+    }
+}
+
 void DrosakaVoiceProcessor::addSlice (double sec)
 {
     const double len = getBank()->lengthSeconds();
     if (len <= 0.0 || sec <= 0.005 || sec >= len - 0.005) return;
     const auto sl = getSlices();
-    for (int i = 0; i < sl.n; ++i) if (std::abs (sl.t[i] - sec) < 0.01) return;   // too close to an existing marker
-    for (int slot = 0; slot < SliceSet::maxMarkers; ++slot)
-        if (sliceParams[slot]->load() <= 0.002f) { setSliceParam (slot, (float) (sec / len)); return; }
+    if (sl.n >= SliceSet::maxMarkers) return;
+    std::vector<double> times (sl.t, sl.t + sl.n);
+    for (auto t : times) if (std::abs (t - sec) < 0.01) return;   // too close to an existing marker
+    times.insert (std::upper_bound (times.begin(), times.end(), sec), sec);
+    writeSlices (times);
 }
 
 void DrosakaVoiceProcessor::moveSlice (int i, double sec)
@@ -433,7 +447,9 @@ void DrosakaVoiceProcessor::removeSlice (int i)
 {
     const auto sl = getSlices();
     if (i < 0 || i >= sl.n) return;
-    setSliceParam (sl.slot[i], 0.0f);
+    std::vector<double> times (sl.t, sl.t + sl.n);
+    times.erase (times.begin() + i);
+    writeSlices (times);
 }
 
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
@@ -659,37 +675,38 @@ void DrosakaVoiceProcessor::fireHit (const pattern::Hit& h, const Bank& b, doubl
 
 void DrosakaVoiceProcessor::captureTake (const juce::AudioBuffer<float>& buffer)
 {
+    // Every input channel the host gives us (sidechain, or a main input on hosts that use
+    // that instead), summed to mono. Metered all the time, so you can see audio arriving.
+    const int n = buffer.getNumSamples();
+    const int chans = juce::jmin (getTotalNumInputChannels(), buffer.getNumChannels());
+    inputChannels = chans;
+    float peak = 0.0f;
+    for (int ch = 0; ch < chans; ++ch) peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, n));
+    inputLevel = juce::jmax (peak, inputLevel.load() * 0.85f);   // gentle fall for the meter
+
     const bool want = recordParam->load() > 0.5f && ! takeBuf[0].empty();
     if (want && ! takeRecording)
     {
         takeRecording = true;
         takeFull = false;
         takePos = 0;
+        takePeak = 0.0f;
+        takeChannels = 0;
     }
     if (takeRecording && want && ! takeFull)
     {
-        // Mono sum of the sidechain (silence if nothing is routed in).
-        auto* sc = getBusCount (true) > 1 ? getBus (true, 1) : nullptr;
-        const int n = buffer.getNumSamples();
         auto& tb = takeBuf[takeIndex];
-        const int room = (int) tb.size() - takePos;
-        const int m = juce::jmin (n, room);
-        float peak = 0.0f;
-        if (sc != nullptr && sc->isEnabled() && sc->getNumberOfChannels() > 0)
+        const int m = juce::jmin (n, (int) tb.size() - takePos);
+        const float scale = chans > 0 ? 1.0f / (float) chans : 0.0f;
+        for (int i = 0; i < m; ++i)
         {
-            auto in = getBusBuffer (const_cast<juce::AudioBuffer<float>&> (buffer), true, 1);
-            const int chans = in.getNumChannels();
-            for (int i = 0; i < m; ++i)
-            {
-                float x = 0.0f;
-                for (int ch = 0; ch < chans; ++ch) x += in.getSample (ch, i);
-                x /= (float) chans;
-                tb[(size_t) (takePos + i)] = x;
-                peak = juce::jmax (peak, std::abs (x));
-            }
+            float x = 0.0f;
+            for (int ch = 0; ch < chans; ++ch) x += buffer.getSample (ch, i);
+            tb[(size_t) (takePos + i)] = x * scale;
         }
-        else std::fill (tb.begin() + takePos, tb.begin() + takePos + m, 0.0f);
         takePos += m;
+        takePeak = juce::jmax (takePeak, peak);
+        takeChannels = juce::jmax (takeChannels, chans);
         recordLevel = peak;
         recordSeconds = (float) (takePos / hostRate);
         if (m < n) { takeFull = true; stopRequested = true; }
@@ -698,6 +715,8 @@ void DrosakaVoiceProcessor::captureTake (const juce::AudioBuffer<float>& buffer)
     {
         // Hand the take to the message thread and switch buffers for the next one.
         finishedLength = takePos;
+        finishedPeak = takePeak;
+        finishedChannels = takeChannels;
         finishedTake = takeIndex;
         takeIndex ^= 1;
         takeRecording = false;
@@ -736,7 +755,11 @@ void DrosakaVoiceProcessor::processFinishedTake()
     juce::String message;
     if (first < 0)
     {
-        message = "Nothing recorded: route a track into this device's Sidechain input, then record";
+        if (finishedChannels.load() == 0)
+            message = "Nothing recorded: Live isn't sending this device any audio. Switch on the device's Sidechain and pick a track in Audio From";
+        else
+            message = "Nothing recorded: the input was silent (peak " + juce::String (juce::Decibels::gainToDecibels (finishedPeak.load(), -120.0f), 0)
+                    + " dB on " + juce::String (finishedChannels.load()) + " ch). Is the source track playing, and its Sidechain gain up?";
     }
     else
     {

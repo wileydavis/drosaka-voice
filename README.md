@@ -37,7 +37,11 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
-**Slice markers are automatable.** The 15 marker parameters (*Slice marker 1–15*) each hold a position as a share of the phrase, and "off" means unused. Automate them in Live and the slices move while it plays. Markers automated past each other simply swap order. Editing markers on the waveform writes these parameters, so drags record as automation when Live is armed. Older sets' markers are converted automatically.
+**Slice markers are automatable.** The 15 marker parameters are named for the key whose slice they start: *Slice C#3 start*, *Slice D3 start* … *Slice D#4 start*. (C3's slice always starts at the top.) Each holds a position as a share of the phrase, and "off" means unused.
+- **Automation:** automate them in Live and the slices move while it plays
+- **No overtaking:** a marker automated past the next one stops just after it, so a parameter never changes which key it controls
+- **Editing on the waveform:** adding, dragging and deleting write these parameters, re-packing them in time order, so edits record as automation when Live is armed
+- **Older sets:** their markers are converted automatically
 
 **Autotune** (Performance panel: TUNE, ROOT, SCALE):
 - **Root:** every voice sits on the root note, each in the octave nearest its own register, so the crowd keeps its spread. This is the most robotic setting
@@ -47,7 +51,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 - TUNE is MIDI-learnable like the grid knobs
 
 **Recording takes:**
-1. In Live, open the device's **Sidechain** section (the triangle at the left of the device, or the device title bar for AU), switch it on, and pick the track to record from, such as a mic track, in *Audio From*
+1. In Live, open the device's **Sidechain** section (the triangle at the left of the device, or the device title bar for AU), switch it on, and pick the track to record from, such as a mic track, in *Audio From*. The meter under REC is always live: "input −xx dB" means audio is arriving, "no input" means Live isn't sending any, and "input silent" means the route is there but quiet
 2. Press **REC** in the Performance panel. The meter shows the input and the timer counts up
 3. Press **REC** again to stop. The take is trimmed of silence, saved as a WAV in `~/Music/drosaka Voice/Takes`, added to the bank, auto-aligned to the primary, and embedded in the set like any stem. Takes can run up to 60 s; a full buffer stops itself
 - REC is a parameter too, so you can MIDI-learn it or automate it to punch in on a cue
@@ -69,6 +73,7 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 - **Double-click** a knob to reset it
 - **The rest:** the menus and switches (PLAY, PITCH LOCK, ENCODE STEPS, DROP, KEEP HUMAN, LATCH) and the stereo-field view sit in the Performance panel beside the grid
 - **MIDI learn:** right-click a knob, choose MIDI learn, then turn a controller. The knob shows its CC in the corner. Any channel works, and one CC drives one knob (re-learning moves it). Right-click and choose Forget to remove it. Mappings save with the Live set and presets
+- **VST3 vs AU:** the VST3 is built without JUCE's 2,080 hidden "MIDI CC" parameters, which had pushed it past Live's 64-parameter auto-list limit, so Live only showed the last-touched parameter. All 41 now list automatically on a **fresh** instance; an existing instance keeps its old list until you replace it or use Configure. The catch: a VST3 can't receive CCs without those parameters, so in the **VST3**, map knobs with Live's **MIDI Map mode** (Cmd-M, then click the parameter in the device panel). In the **AU**, both Live's MIDI Map and the right-click learn work
 - **Host parameters:** every control (41 in all, including the 15 slice markers, Tune and REC) is an automatable parameter, so Live records MIDI-learned moves as automation, and Live's own MIDI Map / Configure work too. The AU's parameters should appear in Live's device panel automatically. If the VST3's don't, use Configure, or just use MIDI learn
 - **Controller layout:** the grid is laid out to match a 16-encoder controller like the MIDI Fighter Twister one-to-one: learn each knob to the encoder in the same position
 

@@ -772,10 +772,17 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
             g.setColour (colours::row);
             g.fillRect (meter);
             g.setColour (juce::Colour (0xffe0303a));
-            g.fillRect (meter.withWidth (juce::roundToInt (juce::jmin (1.0f, proc.recordLevel.load() * 1.4f) * (float) meter.getWidth())));
+            // Always live: shows whether Live is sending audio in, before you record.
+            const float lvl = proc.inputLevel.load();
+            g.setColour (rec ? juce::Colour (0xffe0303a) : colours::codec);
+            g.fillRect (meter.withWidth (juce::roundToInt (juce::jmin (1.0f, lvl * 1.4f) * (float) meter.getWidth())));
             g.setColour (rec ? colours::wave : colours::dim);
-            g.drawText (rec ? juce::String (proc.recordSeconds.load(), 1) + " s" : juce::String ("sidechain in"),
-                        meter.getX(), meter.getBottom() + 3, meter.getWidth(), 14, juce::Justification::centredLeft);
+            const int ins = proc.inputChannels.load();
+            g.drawText (rec ? juce::String (proc.recordSeconds.load(), 1) + " s"
+                            : ins == 0 ? juce::String ("no input")
+                                       : lvl > 1e-4f ? juce::String ("input ") + juce::String (juce::Decibels::gainToDecibels (lvl), 0) + " dB"
+                                                     : juce::String ("input silent"),
+                        meter.getX(), meter.getBottom() + 3, meter.getWidth() + 30, 14, juce::Justification::centredLeft);
         }
 
         // Stereo field: each audible voice as a dot (orange = primary, teal = encoded).

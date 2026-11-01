@@ -846,6 +846,7 @@ int main()
         p.addSlice (1.0); p.addSlice (0.5); p.addSlice (1.5);
         p.addSlice (1.004);   // too close to an existing marker
         CHECK (near (sliceTimes (p), { 0.5, 1.0, 1.5 }) && p.getSlices().numRegions() == 4, "markers stay sorted; near-duplicates ignored");
+        CHECK (p.getSlices().slot[0] == 0 && p.getSlices().slot[1] == 1 && p.getSlices().slot[2] == 2, "markers added out of order are packed into slots in time order");
         p.moveSlice (1, 0.2);   // can't cross its left neighbour
         CHECK (std::abs (sliceTimes (p)[1] - 0.512) < 1e-4, "a dragged marker stops at its neighbour");
         p.moveSlice (1, 1.0);
@@ -1275,9 +1276,11 @@ int main()
         auto mid = play (61);   // C#3: 0.5 .. 1.5 s
         CHECK (mid.getMagnitude (0, L + (int) (0.9 * rate), 2000) > 0.01f && mid.getMagnitude (0, L + (int) (1.0 * rate) + 20, 4000) < 1e-4f,
                "the slice key plays the automated span");
-        // Crossing markers (automation can do anything): they're simply re-sorted.
+        // Automation pushes C#3's marker past D3's: it can't overtake, it stops just before D3's start.
         m1->setValueNotifyingHost (0.9f);
-        CHECK (near (sliceTimes (p), { 1.5, 1.8 }), "markers automated past each other just swap order");
+        CHECK (near (sliceTimes (p), { 1.8, 1.808 }) && p.getSlices().slot[0] == 0, "a marker automated past the next one pushes it along (names stay true)");
+        CHECK (m1->getName (64) == "Slice C#3 start" && p.params.getParameter ("slice15")->getName (64) == "Slice D#4 start",
+               "marker parameters are named for the key whose slice they start");
         p.removeSlice (0); p.removeSlice (0);
         CHECK (m1->getValue() == 0.0f && m2->getValue() == 0.0f, "deleting a marker turns its parameter off");
 
@@ -1462,6 +1465,48 @@ int main()
         takes.deleteRecursively();
         DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
         CHECK (q.getBank()->size() == 3, "recorded takes travel with the set (even if the WAVs are gone)");
+    }
+
+
+    std::printf ("recording: any input layout\n");
+    {
+        // Some hosts feed the main input instead of the sidechain: record whatever arrives.
+        DrosakaVoiceProcessor p;
+        auto layout = p.getBusesLayout();
+        layout.inputBuses.getReference (0) = juce::AudioChannelSet::stereo();
+        layout.inputBuses.getReference (1) = juce::AudioChannelSet::disabled();
+        CHECK (p.setBusesLayout (layout), "a host can enable the main input instead");
+        p.prepareToPlay (rate, 256);
+        p.setTakesFolder (tmp.getChildFile ("takes2"));
+        auto voice = voiceTone (180.0f, 0.4f, rate, (int) rate);
+        juce::AudioBuffer<float> blk (2, 256); juce::MidiBuffer m;
+        auto* rec = p.params.getParameter ("record");
+        rec->setValueNotifyingHost (1.0f);
+        for (int k = 0; k < (int) rate / 256; ++k)
+        {
+            for (int i = 0; i < 256; ++i) { blk.setSample (0, i, voice.getSample (0, k * 256 + i)); blk.setSample (1, i, voice.getSample (0, k * 256 + i)); }
+            p.processBlock (blk, m);
+        }
+        CHECK (p.inputChannels.load() == 2 && p.inputLevel.load() > 0.05f, "the input meter shows audio arriving, before anything is kept");
+        rec->setValueNotifyingHost (0.0f);
+        blk.clear(); p.processBlock (blk, m);
+        p.processFinishedTake();
+        CHECK (p.getBank()->size() == 1, "and the take is recorded from the main input");
+
+        // No input channels at all: the message says so precisely.
+        DrosakaVoiceProcessor q;
+        auto l2 = q.getBusesLayout();
+        l2.inputBuses.getReference (0) = juce::AudioChannelSet::disabled();
+        l2.inputBuses.getReference (1) = juce::AudioChannelSet::disabled();
+        q.setBusesLayout (l2);
+        q.prepareToPlay (rate, 256);
+        q.params.getParameter ("record")->setValueNotifyingHost (1.0f);
+        for (int k = 0; k < 50; ++k) q.processBlock (blk, m);
+        q.params.getParameter ("record")->setValueNotifyingHost (0.0f);
+        q.processBlock (blk, m);
+        q.processFinishedTake();
+        std::printf ("       %s\n", q.getRecordMessage().toRawUTF8());
+        CHECK (q.getRecordMessage().contains ("isn't sending"), "with no input at all, it says Live isn't sending audio (not just 'silent')");
     }
 
     std::printf ("milestone 1 sets still open\n");

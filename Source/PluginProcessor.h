@@ -98,6 +98,8 @@ public:
     juce::String getRecordMessage() const { const juce::ScopedLock l (pathLock); return recordMessage; }
     std::atomic<bool> recordingNow { false };
     std::atomic<float> recordSeconds { 0.0f }, recordLevel { 0.0f };
+    std::atomic<float> inputLevel { 0.0f };    // input meter, live even when not recording
+    std::atomic<int> inputChannels { 0 };      // how many input channels the host is giving us
 
     // Presets: the same state the Live set stores (bank with embedded audio, slices, knobs).
     bool savePreset (const juce::File&);
@@ -250,6 +252,7 @@ private:
     std::atomic<float>* tuneScaleParam = nullptr;
     std::atomic<float>* sliceParams[SliceSet::maxMarkers] {};
     void setSliceParam (int slot, float normalised);
+    void writeSlices (const std::vector<double>& times);
     void fireHit (const pattern::Hit&, const Bank&, double bpm);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
     float latchedEncodeVoices = 0.0f;
@@ -277,6 +280,10 @@ private:
     bool takeRecording = false, takeFull = false;
     std::atomic<int> finishedTake { -1 };       // buffer index ready for the message thread
     std::atomic<int> finishedLength { 0 };
+    std::atomic<float> finishedPeak { 0.0f };
+    std::atomic<int> finishedChannels { 0 };
+    float takePeak = 0.0f;
+    int takeChannels = 0;
     std::atomic<bool> stopRequested { false };  // buffer filled: turn the record switch off
     std::atomic<float>* recordParam = nullptr;
     juce::File takesFolder;

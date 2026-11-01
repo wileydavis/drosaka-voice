@@ -57,19 +57,20 @@ struct SliceSet
         if (k < n) endSec = t[k];
     }
 
-    // From normalised positions (0 = unused), for a phrase of lengthSec.
+    // From normalised positions (0 = unused), for a phrase of lengthSec. Slots keep their
+    // order: slot k is always the start of the k-th slice key (C#3, D3...), so each marker
+    // parameter means one note. A marker automated before its predecessor stops just after it.
     static SliceSet fromPositions (const float* pos, double lengthSec)
     {
         SliceSet s;
         for (int i = 0; i < maxMarkers; ++i)
-            if (pos[i] > 0.002f && pos[i] < 0.998f) { s.t[s.n] = pos[i] * lengthSec; s.slot[s.n] = i; ++s.n; }
-        // sort by time (insertion: 15 at most), then drop markers within 8 ms of the previous
-        for (int i = 1; i < s.n; ++i)
-            for (int j = i; j > 0 && s.t[j] < s.t[j - 1]; --j) { std::swap (s.t[j], s.t[j - 1]); std::swap (s.slot[j], s.slot[j - 1]); }
-        int m = 0;
-        for (int i = 0; i < s.n; ++i)
-            if (m == 0 || s.t[i] - s.t[m - 1] >= 0.008) { s.t[m] = s.t[i]; s.slot[m] = s.slot[i]; ++m; }
-        s.n = m;
+        {
+            if (! (pos[i] > 0.002f && pos[i] < 0.998f)) continue;
+            double t = pos[i] * lengthSec;
+            if (s.n > 0) t = std::max (t, s.t[s.n - 1] + 0.008);
+            if (t >= lengthSec - 0.002) continue;
+            s.t[s.n] = t; s.slot[s.n] = i; ++s.n;
+        }
         return s;
     }
 };
