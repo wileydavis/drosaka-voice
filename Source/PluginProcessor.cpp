@@ -113,7 +113,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     // Pattern mode.
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "playMode", 1 }, "Play mode", juce::StringArray { "Manual", "Pattern" }, 0));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternType", 1 }, "Pattern", pattern::typeNames(), 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternDiv", 1 }, "Pattern division", pattern::divisionNames(), 1));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "patternDiv", 1 }, "Division", pattern::divisionNames(), 1));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "gate", 1 }, "Gate",
         juce::NormalisableRange<float> (0.05f, 1.0f), 0.9f, pct));
     layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "density", 1 }, "Density",
@@ -143,10 +143,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
 
     // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
     // Named for the key whose slice each one starts: marker 1 starts C#3, marker 15 starts D#4.
+    // The note comes first: VST3 hosts also get an 8-character short name, and Live tells
+    // parameters apart by it - "Slice ..." made them all look the same, so only one showed.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
             juce::ParameterID { "slice" + juce::String (i), 1 },
-            "Slice " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " start",
+            juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " slice start",
             juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
             juce::AudioParameterFloatAttributes().withStringFromValueFunction (
                 [] (float v, int) { return v <= 0.002f ? juce::String ("off") : juce::String (v * 100.0f, 1) + "%"; })));

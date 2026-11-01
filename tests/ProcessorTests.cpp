@@ -1208,6 +1208,15 @@ int main()
         }
         std::printf ("       %d parameters: %s\n", ps.size(), ids.joinIntoString (" ").toRawUTF8());
         CHECK (allAuto && ps.size() <= 64, "every control is an automatable host parameter (and few enough for Live to list them)");
+        // VST3 hosts also get an 8-character short name; Live tells parameters apart by it.
+        juce::StringArray shortNames; bool unique = true;
+        for (auto* prm : ps)
+        {
+            const auto sn = prm->getName (8).trim().toLowerCase();
+            if (shortNames.contains (sn)) { unique = false; std::printf ("       duplicate short name: '%s'\n", sn.toRawUTF8()); }
+            shortNames.add (sn);
+        }
+        CHECK (unique, "no two parameters share a short (8-character) name");
 
         auto cc = [&] (int number, int value)
         {
@@ -1279,7 +1288,7 @@ int main()
         // Automation pushes C#3's marker past D3's: it can't overtake, it stops just before D3's start.
         m1->setValueNotifyingHost (0.9f);
         CHECK (near (sliceTimes (p), { 1.8, 1.808 }) && p.getSlices().slot[0] == 0, "a marker automated past the next one pushes it along (names stay true)");
-        CHECK (m1->getName (64) == "Slice C#3 start" && p.params.getParameter ("slice15")->getName (64) == "Slice D#4 start",
+        CHECK (m1->getName (64) == "C#3 slice start" && p.params.getParameter ("slice15")->getName (64) == "D#4 slice start",
                "marker parameters are named for the key whose slice they start");
         p.removeSlice (0); p.removeSlice (0);
         CHECK (m1->getValue() == 0.0f && m2->getValue() == 0.0f, "deleting a marker turns its parameter off");

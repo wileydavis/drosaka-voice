@@ -37,7 +37,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
-**Slice markers are automatable.** The 15 marker parameters are named for the key whose slice they start: *Slice C#3 start*, *Slice D3 start* … *Slice D#4 start*. (C3's slice always starts at the top.) Each holds a position as a share of the phrase, and "off" means unused.
+**Slice markers are automatable.** The 15 marker parameters are named for the key whose slice they start: *C#3 slice start*, *D3 slice start* … *D#4 slice start* (note first, so each has a unique short name: Live tells parameters apart by their first 8 characters). (C3's slice always starts at the top.) Each holds a position as a share of the phrase, and "off" means unused.
 - **Automation:** automate them in Live and the slices move while it plays
 - **No overtaking:** a marker automated past the next one stops just after it, so a parameter never changes which key it controls
 - **Editing on the waveform:** adding, dragging and deleting write these parameters, re-packing them in time order, so edits record as automation when Live is armed
