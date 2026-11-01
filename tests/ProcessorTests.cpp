@@ -846,7 +846,7 @@ int main()
         p.addSlice (1.0); p.addSlice (0.5); p.addSlice (1.5);
         p.addSlice (1.004);   // too close to an existing marker
         CHECK (near (sliceTimes (p), { 0.5, 1.0, 1.5 }) && p.getSlices().numRegions() == 4, "markers stay sorted; near-duplicates ignored");
-        CHECK (p.getSlices().slot[0] == 0 && p.getSlices().slot[1] == 1 && p.getSlices().slot[2] == 2, "markers added out of order are packed into slots in time order");
+        CHECK (p.getSlices().slot[0] == 0 && p.getSlices().slot[1] == 1 && p.getSlices().slot[2] == 2, "markers added out of order still number in time order");
         p.moveSlice (1, 0.2);   // can't cross its left neighbour
         CHECK (std::abs (sliceTimes (p)[1] - 0.512) < 1e-4, "a dragged marker stops at its neighbour");
         p.moveSlice (1, 1.0);
@@ -1253,58 +1253,91 @@ int main()
     }
 
 
-    std::printf ("slice markers as parameters\n");
+    std::printf ("slice markers: homes + automatable offsets\n");
     {
         auto tA = voiceTone (140.0f, 0.4f, rate, (int) (rate * 2.0));
         auto fA = writeWav ("sm_a.wav", tA, rate);
         DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
         juce::StringArray errs; p.addStems ({ fA.getFullPathName() }, errs);
         const int L = p.getLatencySamples();
-        auto* m1 = p.params.getParameter ("slice1");
-        auto* m2 = p.params.getParameter ("slice2");
-        CHECK (m1 != nullptr && m1->isAutomatable() && p.params.getParameter ("slice15") != nullptr, "15 automatable marker parameters");
-        p.addSlice (1.0);
-        CHECK (std::abs (m1->getValue() - 0.5f) < 1e-4f, "a marker added on the waveform writes its parameter (half-way = 50%)");
+        auto* o1 = p.params.getParameter ("sliceOffset1");
+        auto* o2 = p.params.getParameter ("sliceOffset2");
+        CHECK (o1 != nullptr && o1->isAutomatable() && p.params.getParameter ("sliceOffset15") != nullptr, "15 automatable marker-offset parameters");
+        CHECK (o1->getName (64) == "C#3 slice offset" && p.params.getParameter ("sliceOffset15")->getName (64) == "D#4 slice offset",
+               "named for the key whose slice each marker starts");
+        CHECK (std::abs (o1->getDefaultValue() - 0.5f) < 1e-6f && o1->getCurrentValueAsText() == "0 ms", "an offset lane starts at zero, in the middle");
 
-        // Automation moves it: the host sets the parameter, the slice follows.
-        m1->setValueNotifyingHost (0.25f);
-        m2->setValueNotifyingHost (0.75f);
-        CHECK (near (sliceTimes (p), { 0.5, 1.5 }), "automating marker parameters moves the slices");
-        auto play = [&] (int note)
+        p.addSlice (0.5); p.addSlice (1.5);
+        auto ms = [&] (juce::AudioProcessorParameter* prm, float v) { prm->setValueNotifyingHost (dynamic_cast<juce::RangedAudioParameter*> (prm)->convertTo0to1 (v)); };
+        ms (o1, 120.0f);
+        CHECK (near (sliceTimes (p), { 0.62, 1.5 }), "up = later: +120 ms moves C#3's marker from 0.50 to 0.62 s");
+        ms (o1, -200.0f);
+        CHECK (near (sliceTimes (p), { 0.30, 1.5 }), "down = earlier: -200 ms moves it to 0.30 s");
+        ms (o1, 0.0f);
+        CHECK (near (sliceTimes (p), { 0.5, 1.5 }), "back to the middle: back home");
+        ms (o2, -500.0f); ms (o1, 500.0f);
+        CHECK (near (sliceTimes (p), { 1.0, 1.008 }), "offset markers never overtake each other");
+        ms (o1, 0.0f); ms (o2, 0.0f);
+
+        // Playback follows the offset.
+        ms (o1, 250.0f);   // C#3 slice now 0.75 .. 1.5
+        run (p, 256, 500, {});
+        juce::AudioBuffer<float> out (2, 256 * 450), blk (2, 256);
+        for (int k = 0; k < 450; ++k)
         {
-            run (p, 256, 500, {});
-            juce::AudioBuffer<float> out (2, 256 * 450), blk (2, 256);
-            for (int k = 0; k < 450; ++k)
-            {
-                juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
-                p.processBlock (blk, m);
-                for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
-            }
-            return out;
-        };
-        auto mid = play (61);   // C#3: 0.5 .. 1.5 s
-        CHECK (mid.getMagnitude (0, L + (int) (0.9 * rate), 2000) > 0.01f && mid.getMagnitude (0, L + (int) (1.0 * rate) + 20, 4000) < 1e-4f,
-               "the slice key plays the automated span");
-        // Automation pushes C#3's marker past D3's: it can't overtake, it stops just before D3's start.
-        m1->setValueNotifyingHost (0.9f);
-        CHECK (near (sliceTimes (p), { 1.8, 1.808 }) && p.getSlices().slot[0] == 0, "a marker automated past the next one pushes it along (names stay true)");
-        CHECK (m1->getName (64) == "C#3 slice start" && p.params.getParameter ("slice15")->getName (64) == "D#4 slice start",
-               "marker parameters are named for the key whose slice they start");
-        p.removeSlice (0); p.removeSlice (0);
-        CHECK (m1->getValue() == 0.0f && m2->getValue() == 0.0f, "deleting a marker turns its parameter off");
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 61, (juce::uint8) 100), 0);
+            p.processBlock (blk, m);
+            for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
+        }
+        CHECK (out.getMagnitude (0, L + (int) (0.7 * rate), 2000) > 0.01f && out.getMagnitude (0, L + (int) (0.75 * rate) + 20, 4000) < 1e-4f,
+               "the slice key plays the offset span");
+        ms (o1, 0.0f);
 
-        // Sets saved before markers were parameters: seconds in the bank are migrated.
+        // Dragging on the waveform moves the home (the marker lands where you drop it, offset kept).
+        ms (o1, 100.0f);
+        p.moveSlice (0, 0.9);
+        CHECK (near (sliceTimes (p), { 0.9, 1.5 }) && std::abs (p.getSlices().base[0] - 0.8) < 1e-4, "dragging an offset marker keeps its offset, moves its home");
+        ms (o1, 0.0f);
+
+        // Adding a marker before others renumbers them; their offsets travel with them.
+        ms (o1, 60.0f);
+        p.addSlice (0.2);
+        CHECK (near (sliceTimes (p), { 0.2, 0.86, 1.5 }) && std::abs (o2->getValue() - 0.56f) < 1e-3f, "inserting a marker keeps the others where they are");
+        p.removeSlice (0);
+        CHECK (near (sliceTimes (p), { 0.86, 1.5 }) && std::abs (o1->getValue() - 0.56f) < 1e-3f, "deleting one does too");
+
+        // Saved with the set.
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (near (sliceTimes (q), { 0.86, 1.5 }), "homes and offsets reopen with the set");
+
+        // Markers from the previous build: absolute positions, possibly out of slot order.
+        juce::ValueTree st ("DrosakaVoice");
+        st.setProperty ("version", 4, nullptr);
+        juce::ValueTree pt ("PARAMS");
+        auto addParam = [&] (const char* id, double v) { juce::ValueTree c ("PARAM"); c.setProperty ("id", id, nullptr); c.setProperty ("value", v, nullptr); pt.appendChild (c, nullptr); };
+        addParam ("slice1", 0.75); addParam ("slice2", 0.25); addParam ("slice3", 0.0);   // 1.5 s and 0.5 s, out of order
+        st.appendChild (pt, nullptr);
+        juce::ValueTree bt ("Bank");
+        juce::ValueTree v ("Stem"); v.setProperty ("path", fA.getFullPathName(), nullptr); bt.appendChild (v, nullptr);
+        st.appendChild (bt, nullptr);
+        juce::MemoryBlock omb; juce::AudioProcessor::copyXmlToBinary (*st.createXml(), omb);
+        DrosakaVoiceProcessor o; o.setStateInformation (omb.getData(), (int) omb.getSize());
+        CHECK (near (sliceTimes (o), { 0.5, 1.5 }), "existing markers from the last build are picked up, in time order");
+        ms (o.params.getParameter ("sliceOffset1"), 100.0f);
+        CHECK (near (sliceTimes (o), { 0.6, 1.5 }), "and 'C#3 slice offset' moves the existing first marker");
+
+        // The older-still format (seconds in the bank) too.
         juce::ValueTree old ("DrosakaVoice");
         old.setProperty ("version", 3, nullptr);
-        juce::ValueTree bt ("Bank");
-        bt.setProperty ("slices", "0.4,1.2", nullptr);
-        juce::ValueTree v ("Stem"); v.setProperty ("path", fA.getFullPathName(), nullptr); bt.appendChild (v, nullptr);
-        old.appendChild (bt, nullptr);
-        juce::MemoryBlock omb; juce::AudioProcessor::copyXmlToBinary (*old.createXml(), omb);
-        DrosakaVoiceProcessor o; o.setStateInformation (omb.getData(), (int) omb.getSize());
-        CHECK (near (sliceTimes (o), { 0.4, 1.2 }), "older sets' markers become marker parameters");
+        juce::ValueTree bt2 ("Bank");
+        bt2.setProperty ("slices", "1.2,0.4", nullptr);
+        juce::ValueTree v2 ("Stem"); v2.setProperty ("path", fA.getFullPathName(), nullptr); bt2.appendChild (v2, nullptr);
+        old.appendChild (bt2, nullptr);
+        juce::MemoryBlock omb2; juce::AudioProcessor::copyXmlToBinary (*old.createXml(), omb2);
+        DrosakaVoiceProcessor older; older.setStateInformation (omb2.getData(), (int) omb2.getSize());
+        CHECK (near (sliceTimes (older), { 0.4, 1.2 }), "older sets' markers are picked up too");
     }
-
 
     std::printf ("autotune\n");
     {

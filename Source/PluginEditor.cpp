@@ -271,6 +271,14 @@ public:
         // Markers.
         for (int i = 0; i < sl.n; ++i)
         {
+            // Automation offset: a faint line at the marker's home, joined to where it is now.
+            if (std::abs (sl.t[i] - sl.base[i]) > 0.001)
+            {
+                const float hx = xOf (sl.base[i]);
+                g.setColour (colours::slice.withAlpha (0.35f));
+                g.drawVerticalLine ((int) hx, (float) area.getY() + 10.0f, (float) area.getBottom());
+                g.drawHorizontalLine (area.getY() + 10, juce::jmin (hx, xOf (sl.t[i])), juce::jmax (hx, xOf (sl.t[i])));
+            }
             const float x = xOf (sl.t[i]);
             g.setColour (i == dragging ? colours::wave : colours::slice);
             g.fillRect (x - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight());

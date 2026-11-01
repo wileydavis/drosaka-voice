@@ -32,6 +32,7 @@ int main (int argc, char** argv)
     p.applyPendingMidi();
     p.armMidiLearn ("bitRate");
     p.params.getParameter ("tuneAmount")->setValueNotifyingHost (0.7f);
+    p.params.getParameter ("sliceOffset2")->setValueNotifyingHost (0.75f);   // D3 marker +250 ms
     std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
     for (int i = 0; i < 5; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
     auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

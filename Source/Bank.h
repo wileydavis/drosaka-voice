@@ -34,14 +34,18 @@ struct Stem : public juce::ReferenceCountedObject
 enum class AlignState { reference = 0, autoAligned = 1, unsure = 2, manual = 3 };
 
 //==============================================================================
-// Slice markers, resolved for use: seconds on the phrase timeline, sorted. They live
-// in 15 host parameters (so they can be automated); 'slot' is which parameter each
-// marker came from. N markers make N+1 regions; region k plays on C3 + k.
+// Slice markers, resolved for use (seconds on the phrase timeline, in order).
+// Each marker k has a home position ('base', set on the waveform, saved with the set) plus
+// an automatable offset (parameter "<note> slice offset", 0 in the middle of the lane,
+// +-500 ms). Marker k always starts the slice on key C3 + k + 1, so each offset parameter
+// always means one note. N markers make N+1 regions; region k plays on C3 + k.
 struct SliceSet
 {
     static constexpr int maxMarkers = 15;
-    double t[maxMarkers] {};
-    int slot[maxMarkers] {};
+    static constexpr float maxOffsetMs = 500.0f;
+    double t[maxMarkers] {};      // effective time (base + offset, kept in order)
+    double base[maxMarkers] {};   // home position
+    int slot[maxMarkers] {};      // which marker/parameter (0 = the C#3 one)
     int n = 0;
 
     int numRegions() const { return n > 0 ? n + 1 : 0; }
@@ -57,19 +61,18 @@ struct SliceSet
         if (k < n) endSec = t[k];
     }
 
-    // From normalised positions (0 = unused), for a phrase of lengthSec. Slots keep their
-    // order: slot k is always the start of the k-th slice key (C#3, D3...), so each marker
-    // parameter means one note. A marker automated before its predecessor stops just after it.
-    static SliceSet fromPositions (const float* pos, double lengthSec)
+    // bases: seconds, packed and ascending, 0 = unused. offsetsMs: per marker.
+    // A marker offset past its neighbour stops just after it (never overtakes).
+    static SliceSet resolve (const float* bases, const float* offsetsMs, double lengthSec)
     {
         SliceSet s;
         for (int i = 0; i < maxMarkers; ++i)
         {
-            if (! (pos[i] > 0.002f && pos[i] < 0.998f)) continue;
-            double t = pos[i] * lengthSec;
+            if (bases[i] <= 0.0f) break;
+            double t = juce::jlimit (0.003, juce::jmax (0.003, lengthSec - 0.003), (double) bases[i] + offsetsMs[i] * 0.001);
             if (s.n > 0) t = std::max (t, s.t[s.n - 1] + 0.008);
-            if (t >= lengthSec - 0.002) continue;
-            s.t[s.n] = t; s.slot[s.n] = i; ++s.n;
+            if (t >= lengthSec - 0.002) break;
+            s.t[s.n] = t; s.base[s.n] = bases[i]; s.slot[s.n] = i; ++s.n;
         }
         return s;
     }

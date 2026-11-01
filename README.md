@@ -37,11 +37,13 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
-**Slice markers are automatable.** The 15 marker parameters are named for the key whose slice they start: *C#3 slice start*, *D3 slice start* … *D#4 slice start* (note first, so each has a unique short name: Live tells parameters apart by their first 8 characters). (C3's slice always starts at the top.) Each holds a position as a share of the phrase, and "off" means unused.
-- **Automation:** automate them in Live and the slices move while it plays
-- **No overtaking:** a marker automated past the next one stops just after it, so a parameter never changes which key it controls
-- **Editing on the waveform:** adding, dragging and deleting write these parameters, re-packing them in time order, so edits record as automation when Live is armed
-- **Older sets:** their markers are converted automatically
+**Slice markers are automatable, as offsets.** Each marker has a **home** position, set by placing or dragging it on the waveform and saved with the set. Each also has an automatable **offset** parameter named for the key whose slice it starts: *C#3 slice offset*, *D3 slice offset* … *D#4 slice offset*. (C3's slice always starts at the top.)
+- **The lane:** an offset lane starts at **0 in the middle**. Up moves the marker later and down moves it earlier, up to ±500 ms
+- **Display:** on the waveform, an offset marker shows where it is now, with a faint line back to its home
+- **No overtaking:** offsets can't push a marker past its neighbour; it stops just after it
+- **Dragging** a marker moves its home and keeps its offset, so it lands where you drop it
+- **Adding or deleting** a marker renumbers the ones after it (keys follow time order), and their current offsets move with them so nothing jumps. Automation lanes stay with their keys
+- **Existing sets:** markers from earlier builds, including ones stored out of order, are picked up in time order, so each named offset moves the right marker
 
 **Autotune** (Performance panel: TUNE, ROOT, SCALE):
 - **Root:** every voice sits on the root note, each in the octave nearest its own register, so the crowd keeps its spread. This is the most robotic setting

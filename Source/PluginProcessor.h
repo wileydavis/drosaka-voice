@@ -71,8 +71,8 @@ public:
     void alignAll();                                  // re-run auto-align against the primary
 
     // Slicing (message thread). Markers are seconds on the phrase timeline.
-    // Markers are host parameters slice1..slice15 (position as a share of the phrase),
-    // so they can be automated; these edit them (and record as automation when armed).
+    // Markers: a home position each (edited here, saved with the set) plus an automatable
+    // offset parameter per marker ("C#3 slice offset" ...), 0 = the middle of the lane.
     void addSlice (double seconds);
     void moveSlice (int index, double seconds);       // index in time order; clamped between neighbours
     void removeSlice (int index);
@@ -250,9 +250,11 @@ private:
     std::atomic<float>* tuneAmountParam = nullptr;
     std::atomic<float>* tuneRootParam = nullptr;
     std::atomic<float>* tuneScaleParam = nullptr;
-    std::atomic<float>* sliceParams[SliceSet::maxMarkers] {};
-    void setSliceParam (int slot, float normalised);
-    void writeSlices (const std::vector<double>& times);
+    std::atomic<float> sliceBase[SliceSet::maxMarkers] {};        // seconds, packed ascending, 0 = unused
+    std::atomic<float>* sliceOffsetParams[SliceSet::maxMarkers] {};
+    void setBases (const std::vector<double>& bases);
+    void setOffsetMs (int slot, float ms);
+    std::vector<double> currentBases() const;
     void fireHit (const pattern::Hit&, const Bank&, double bpm);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
     float latchedEncodeVoices = 0.0f;

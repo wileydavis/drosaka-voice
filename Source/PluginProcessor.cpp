@@ -38,7 +38,7 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     startTimerHz (60);   // applies MIDI-learned CC moves on the message thread
     countParam = params.getRawParameterValue ("count");
     encodeParam = params.getRawParameterValue ("encodeCount");
-    for (int i = 0; i < SliceSet::maxMarkers; ++i) sliceParams[i] = params.getRawParameterValue ("slice" + juce::String (i + 1));
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) sliceOffsetParams[i] = params.getRawParameterValue ("sliceOffset" + juce::String (i + 1));
     tuneAmountParam = params.getRawParameterValue ("tuneAmount");
     tuneRootParam = params.getRawParameterValue ("tuneRoot");
     tuneScaleParam = params.getRawParameterValue ("tuneScale");
@@ -141,17 +141,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     // Record a take from the sidechain input (automatable: punch in on a cue).
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "record", 1 }, "Record take", false));
 
-    // Slice markers: position as a share of the phrase; 0 = unused. Automatable.
-    // Named for the key whose slice each one starts: marker 1 starts C#3, marker 15 starts D#4.
-    // The note comes first: VST3 hosts also get an 8-character short name, and Live tells
-    // parameters apart by it - "Slice ..." made them all look the same, so only one showed.
+    // Slice marker offsets: each marker's automatable nudge from its home position,
+    // 0 in the middle of the lane, + later / - earlier, up to 500 ms. Named for the key whose
+    // slice the marker starts (marker 1 starts C#3 ... marker 15 starts D#4). The note comes
+    // first: VST3 hosts also get an 8-character short name, and Live tells parameters apart by it.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
-            juce::ParameterID { "slice" + juce::String (i), 1 },
-            juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " slice start",
-            juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
-            juce::AudioParameterFloatAttributes().withStringFromValueFunction (
-                [] (float v, int) { return v <= 0.002f ? juce::String ("off") : juce::String (v * 100.0f, 1) + "%"; })));
+            juce::ParameterID { "sliceOffset" + juce::String (i), 1 },
+            juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " slice offset",
+            juce::NormalisableRange<float> (-SliceSet::maxOffsetMs, SliceSet::maxOffsetMs), 0.0f,
+            juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                { return std::abs (v) < 0.5f ? juce::String ("0 ms") : (v > 0 ? "+" : "") + juce::String (juce::roundToInt (v)) + " ms"; })));
     return layout;
 }
 
@@ -397,41 +397,54 @@ void DrosakaVoiceProcessor::resetOffset (int idx)
 
 SliceSet DrosakaVoiceProcessor::getSlices() const
 {
-    float pos[SliceSet::maxMarkers];
-    for (int i = 0; i < SliceSet::maxMarkers; ++i) pos[i] = sliceParams[i]->load();
-    return SliceSet::fromPositions (pos, getBank()->lengthSeconds());
+    float bases[SliceSet::maxMarkers], offs[SliceSet::maxMarkers];
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load(); }
+    return SliceSet::resolve (bases, offs, getBank()->lengthSeconds());
 }
 
-void DrosakaVoiceProcessor::setSliceParam (int slot, float v)
+std::vector<double> DrosakaVoiceProcessor::currentBases() const
 {
-    auto* prm = params.getParameter ("slice" + juce::String (slot + 1));
+    std::vector<double> v;
+    for (auto& b : sliceBase) { if (b.load() <= 0.0f) break; v.push_back (b.load()); }
+    return v;
+}
+
+void DrosakaVoiceProcessor::setBases (const std::vector<double>& bases)
+{
+    for (int i = 0; i < SliceSet::maxMarkers; ++i)
+        sliceBase[i] = i < (int) bases.size() ? (float) bases[(size_t) i] : 0.0f;
+    ++bankGeneration;   // redraw
+}
+
+void DrosakaVoiceProcessor::setOffsetMs (int slot, float ms)
+{
+    auto* prm = params.getParameter ("sliceOffset" + juce::String (slot + 1));
+    const float v = prm->convertTo0to1 (juce::jlimit (-SliceSet::maxOffsetMs, SliceSet::maxOffsetMs, ms));
+    if (std::abs (prm->getValue() - v) < 1e-7f) return;
     prm->beginChangeGesture();
     prm->setValueNotifyingHost (v);
     prm->endChangeGesture();
 }
 
-// Markers are kept packed and in time order across slots 1..n, so every marker parameter
-// keeps meaning the same note (slot k = where C3 + k starts). Edits re-pack the slots.
-void DrosakaVoiceProcessor::writeSlices (const std::vector<double>& times)
-{
-    const double len = getBank()->lengthSeconds();
-    for (int slot = 0; slot < SliceSet::maxMarkers; ++slot)
-    {
-        const float v = slot < (int) times.size() && len > 0.0 ? (float) (times[(size_t) slot] / len) : 0.0f;
-        if (std::abs (sliceParams[slot]->load() - v) > 1e-7f) setSliceParam (slot, v);
-    }
-}
-
+// Adding or deleting a marker renumbers the ones after it (keys follow time order); their
+// current offsets move with them so nothing on screen jumps.
 void DrosakaVoiceProcessor::addSlice (double sec)
 {
     const double len = getBank()->lengthSeconds();
     if (len <= 0.0 || sec <= 0.005 || sec >= len - 0.005) return;
     const auto sl = getSlices();
-    if (sl.n >= SliceSet::maxMarkers) return;
-    std::vector<double> times (sl.t, sl.t + sl.n);
-    for (auto t : times) if (std::abs (t - sec) < 0.01) return;   // too close to an existing marker
-    times.insert (std::upper_bound (times.begin(), times.end(), sec), sec);
-    writeSlices (times);
+    auto bases = currentBases();
+    if ((int) bases.size() >= SliceSet::maxMarkers) return;
+    for (int i = 0; i < sl.n; ++i) if (std::abs (sl.t[i] - sec) < 0.01) return;   // too close to an existing marker
+
+    int k = 0;
+    while (k < sl.n && sl.t[k] < sec) ++k;   // insert by where it appears
+    std::vector<float> offs;
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) offs.push_back (sliceOffsetParams[i]->load());
+    bases.insert (bases.begin() + k, sec);
+    setBases (bases);
+    for (int i = SliceSet::maxMarkers - 1; i > k; --i) setOffsetMs (i, offs[(size_t) i - 1]);
+    setOffsetMs (k, 0.0f);
 }
 
 void DrosakaVoiceProcessor::moveSlice (int i, double sec)
@@ -442,16 +455,25 @@ void DrosakaVoiceProcessor::moveSlice (int i, double sec)
     const double lo = (i > 0 ? sl.t[i - 1] : 0.0) + 0.012;
     const double hi = (i + 1 < sl.n ? sl.t[i + 1] : len) - 0.012;
     if (hi <= lo) return;
-    setSliceParam (sl.slot[i], (float) (juce::jlimit (lo, hi, sec) / len));
+    // The marker lands where it's dragged: move its home, keep its offset.
+    auto bases = currentBases();
+    const double offset = sliceOffsetParams[sl.slot[i]]->load() * 0.001;
+    bases[(size_t) sl.slot[i]] = juce::jmax (0.004, juce::jlimit (lo, hi, sec) - offset);
+    std::sort (bases.begin(), bases.end());
+    setBases (bases);
 }
 
 void DrosakaVoiceProcessor::removeSlice (int i)
 {
     const auto sl = getSlices();
     if (i < 0 || i >= sl.n) return;
-    std::vector<double> times (sl.t, sl.t + sl.n);
-    times.erase (times.begin() + i);
-    writeSlices (times);
+    auto bases = currentBases();
+    const int k = sl.slot[i];
+    std::vector<float> offs;
+    for (int j = 0; j < SliceSet::maxMarkers; ++j) offs.push_back (sliceOffsetParams[j]->load());
+    bases.erase (bases.begin() + k);
+    setBases (bases);
+    for (int j = k; j < SliceSet::maxMarkers; ++j) setOffsetMs (j, j + 1 < SliceSet::maxMarkers ? offs[(size_t) j + 1] : 0.0f);
 }
 
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
@@ -814,9 +836,9 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     Bank& b = *bank;
     const int n = juce::jmin (b.size(), maxVoices);
     {
-        float pos[SliceSet::maxMarkers];
-        for (int i = 0; i < SliceSet::maxMarkers; ++i) pos[i] = sliceParams[i]->load();
-        liveSlices = SliceSet::fromPositions (pos, b.lengthSeconds());
+        float bases[SliceSet::maxMarkers], offs[SliceSet::maxMarkers];
+        for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load(); }
+        liveSlices = SliceSet::resolve (bases, offs, b.lengthSeconds());
     }
     liveTune.amount = tuneAmountParam->load();
     liveTune.pitchClass = juce::jlimit (0, 11, (int) tuneRootParam->load());
@@ -1189,6 +1211,13 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
     state.appendChild (bankTree, nullptr);
 
+    // Slice markers' home positions (seconds); their offsets are parameters above.
+    {
+        juce::StringArray sb;
+        for (auto t : currentBases()) sb.add (juce::String (t, 6));
+        state.setProperty ("sliceBase", sb.joinIntoString (","), nullptr);
+    }
+
     // MIDI-learned controls, by parameter ID ("cc:id,cc:id").
     juce::StringArray map;
     auto& ps = getParameters();
@@ -1212,6 +1241,16 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     if (! state.isValid()) return;
 
     auto p = state.getChildWithName (params.state.getType());
+    // Builds from Nov 1 stored markers as absolute parameters "slice1".."slice15" (share of
+    // the phrase), sometimes out of order: pick them up so they become home positions.
+    std::vector<double> oldShares;
+    if (p.isValid())
+        for (auto c : p)
+        {
+            const auto id = c.getProperty ("id").toString();
+            if (id.startsWith ("slice") && ! id.startsWith ("sliceOffset"))
+                if (const double v = (double) c.getProperty ("value", 0.0); v > 0.002 && v < 0.998) oldShares.push_back (v);
+        }
     if (p.isValid()) params.replaceState (p);
 
     for (auto& c : ccToParam) c = -1;
@@ -1283,15 +1322,22 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
     { const juce::ScopedLock l (pathLock); missingPaths = missing; }
     swapBank (b);
 
-    // Migrate old slice markers into the marker parameters.
-    if (! legacySlices.empty())
+    // Slice markers: home positions, or older formats converted (always sorted, so each
+    // offset parameter lines up with the marker it's named for).
+    std::vector<double> bases;
+    if (state.hasProperty ("sliceBase"))
     {
-        const double len = b->lengthSeconds();
-        std::sort (legacySlices.begin(), legacySlices.end());
-        for (int i = 0; i < SliceSet::maxMarkers; ++i)
-            params.getParameter ("slice" + juce::String (i + 1))->setValueNotifyingHost (
-                i < (int) legacySlices.size() && len > 0.0 ? (float) (legacySlices[(size_t) i] / len) : 0.0f);
+        for (auto& t : juce::StringArray::fromTokens (state.getProperty ("sliceBase").toString(), ",", ""))
+            if (t.getDoubleValue() > 0.0) bases.push_back (t.getDoubleValue());
     }
+    else if (! oldShares.empty())
+    {
+        for (auto v : oldShares) bases.push_back (v * b->lengthSeconds());
+    }
+    else bases = legacySlices;
+    std::sort (bases.begin(), bases.end());
+    if ((int) bases.size() > SliceSet::maxMarkers) bases.resize ((size_t) SliceSet::maxMarkers);
+    setBases (bases);
 }
 
 //==============================================================================
