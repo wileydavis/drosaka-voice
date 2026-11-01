@@ -182,13 +182,13 @@ static int renderPattern (int argc, char** argv)
         const auto& st = *b->stems[(size_t) b->primary];
         const int win = (int) (0.005 * st.sampleRate);
         float peak = st.audio.getMagnitude (0, 0, st.audio.getNumSamples());
-        int quiet = 0; bool inGap = false; int count = 0;
+        int quiet = 0; bool inGap = true; int count = 0;   // the first sound gets a marker too: it starts the usable phrase
         for (int i = 0; i + win < st.audio.getNumSamples(); i += win)
         {
             const bool q = st.audio.getRMSLevel (0, i, win) < peak * 0.03f;
             quiet = q ? quiet + 1 : 0;
             if (quiet >= 5) inGap = true;
-            if (! q && inGap) { if (i > win * 20) { p.addSlice (i / st.sampleRate - 0.01); ++count; } inGap = false; }
+            if (! q && inGap) { p.addSlice (juce::jmax (0.004, i / st.sampleRate - 0.01)); ++count; inGap = false; }
         }
         std::printf ("%d slices at word gaps\n", count);
     }

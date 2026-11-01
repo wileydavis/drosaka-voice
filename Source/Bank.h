@@ -38,28 +38,33 @@ enum class AlignState { reference = 0, autoAligned = 1, unsure = 2, manual = 3 }
 // Each marker k has a home position ('base', set on the waveform, saved with the set) plus
 // an automatable offset (parameter "<note> slice offset", 0 in the middle of the lane):
 // +100% reaches the next marker's home (or the end of the audio), -100% the previous
-// marker's home (or the start). Marker k always starts the slice on key C3 + k + 1, so
-// each offset parameter always means one note. N markers make N+1 regions on C3 + k.
+// marker's home (or the start). The first marker is where the usable phrase begins: the
+// audio before it is never played. Marker k (from 0) starts the slice on key C3 + k, so each
+// offset parameter always means one note; N markers make N regions, the last running to the
+// end of the audio.
 struct SliceSet
 {
     static constexpr int maxMarkers = 15;
     static constexpr double gap = 0.01;   // how close a fully offset marker gets to its neighbour (s)
     double t[maxMarkers] {};      // effective time (kept in order)
     double base[maxMarkers] {};   // home position
-    int slot[maxMarkers] {};      // which marker/parameter (0 = the C#3 one)
+    int slot[maxMarkers] {};      // which marker/parameter (0 = the C3 one)
     int n = 0;
 
-    int numRegions() const { return n > 0 ? n + 1 : 0; }
+    int numRegions() const { return n; }
 
-    // A slice key's region, or the whole phrase for any other key.
+    // Where the usable phrase starts: the first marker (or the top, with no markers).
+    double usableStart() const { return n > 0 ? t[0] : 0.0; }
+
+    // A slice key's region, or the whole usable phrase (first marker to the end) for any other key.
     void region (int note, double lengthSec, double& startSec, double& endSec) const
     {
-        startSec = 0.0;
+        startSec = usableStart();
         endSec = lengthSec;
         const int k = note - 60;
-        if (n == 0 || k < 0 || k > n) return;
-        if (k > 0) startSec = t[k - 1];
-        if (k < n) endSec = t[k];
+        if (n == 0 || k < 0 || k >= n) return;
+        startSec = t[k];
+        if (k + 1 < n) endSec = t[k + 1];
     }
 
     // Where a marker with this home and offset (-1..1) sits, given its neighbours' homes.

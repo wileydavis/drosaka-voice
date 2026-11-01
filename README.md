@@ -37,7 +37,9 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
-**Slice markers are automatable, as offsets.** Each marker has a **home** position, set by placing or dragging it on the waveform and saved with the set. Each also has an automatable **offset** parameter named for the key whose slice it starts: *C#3 slice offset*, *D3 slice offset* … *D#4 slice offset*. (C3's slice always starts at the top.)
+**The first marker starts the phrase.** Everything before it is dead space and never plays (it's dimmed on the waveform). N markers make N slices: the first marker starts **C3**, the next C#3, and so on, and the last slice runs to the end of the audio. Any other key plays from the first marker to the end. *This moved every slice key down a semitone from earlier builds, so a clip written for C#3 now plays the slice after the one it used to.* With no markers, the whole stem plays.
+
+**Slice markers are automatable, as offsets.** Each marker has a **home** position, set by placing or dragging it on the waveform and saved with the set. Each also has an automatable **offset** parameter named for the key whose slice it starts: *C3 slice offset*, *C#3 slice offset* … *D4 slice offset*.
 - **The lane:** an offset lane starts at **0 in the middle**. Up moves the marker later and down moves it earlier. The range is the marker's own room: **+100%** takes it right up to the next marker (or, for the last marker, the end of the audio), and **−100%** takes it back to the previous marker (or the start). ±50% is halfway
 - **Display:** on the waveform, an offset marker shows where it is now, with a faint line back to its home
 - **No overtaking:** offsets can't push a marker past its neighbour; it stops just after it
@@ -100,7 +102,7 @@ All sixteen knobs sit in one 4×4 grid, row by row:
 
 ### Pattern schemes (Nov 1 rework)
 
-Switch **PLAY** to Pattern and hold one key. The loop starts from that key's slice on the next grid line and runs on through **every** slice, wrapping around. C#3 starts at slice 2; a key outside the slice range starts at the top. Holding another slice key restarts the loop there; LATCH keeps it going after you let go.
+Switch **PLAY** to Pattern and hold one key. The loop starts from that key's slice on the next grid line and runs on through **every** slice, wrapping around. C#3 starts at slice 2; a key outside the slice range starts at the first slice. Holding another slice key restarts the loop there; LATCH keeps it going after you let go.
 
 **Four macros, the same in every scheme** (bottom grid row, all automatable and MIDI-learnable):
 - **LENGTH:** how many slices the loop uses, from the trigger slice (one word on repeat … the whole line). Automate it over 16 bars to unfold the phrase. A change waits for the loop's next restart, so nothing stumbles

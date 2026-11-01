@@ -945,7 +945,7 @@ int main()
 
         p.addSlice (1.0); p.addSlice (0.5); p.addSlice (1.5);
         p.addSlice (1.004);   // too close to an existing marker
-        CHECK (near (sliceTimes (p), { 0.5, 1.0, 1.5 }) && p.getSlices().numRegions() == 4, "markers stay sorted; near-duplicates ignored");
+        CHECK (near (sliceTimes (p), { 0.5, 1.0, 1.5 }) && p.getSlices().numRegions() == 3, "markers stay sorted; near-duplicates ignored; 3 markers = 3 slices");
         CHECK (p.getSlices().slot[0] == 0 && p.getSlices().slot[1] == 1 && p.getSlices().slot[2] == 2, "markers added out of order still number in time order");
         p.moveSlice (1, 0.2);   // can't cross its left neighbour
         CHECK (std::abs (sliceTimes (p)[1] - 0.512) < 1e-4, "a dragged marker stops at its neighbour");
@@ -966,10 +966,11 @@ int main()
         };
         auto mag = [] (const juce::AudioBuffer<float>& o, int a, int n2) { return juce::jmax (o.getMagnitude (0, a, n2), o.getMagnitude (1, a, n2)); };
 
-        auto whole = play (30);   // not a slice key: the whole phrase
-        auto s2 = play (61);      // C#3: region 2 = 0.5 .. 1.0 s
-        const int r0 = L + (int) (0.5 * rate), r1 = L + (int) (1.0 * rate);
-        CHECK (mag (whole, L + (int) (1.7 * rate), 2000) > 0.01f, "other keys play the whole phrase");
+        auto whole = play (30);   // not a slice key: the whole usable phrase, first marker to the end
+        auto s2 = play (60);      // C3: the first slice = 0.5 .. 1.0 s
+        const int r0 = L, r1 = L + (int) (0.5 * rate);
+        CHECK (mag (whole, L + 200, 2000) > 0.01f && mag (whole, L + (int) (1.2 * rate), 2000) > 0.01f && mag (whole, L + (int) (1.55 * rate), 4000) < 1e-4f,
+               "other keys play the usable phrase: from the first marker to the end");
         CHECK (mag (s2, L + 200, (int) (0.5 * rate) - 400) > 0.01f, "slice key plays its region straight away");
         CHECK (mag (s2, L + (int) (0.5 * rate) + 10, (int) (0.4 * rate)) < 1e-4f, "and stops at the region's end marker");
 
@@ -985,7 +986,7 @@ int main()
         CHECK (num / std::sqrt (da * db) > 0.99, "the slice is that span of the phrase, across every voice");
         (void) r1;
 
-        auto last = play (63);    // D#3: region 4 = 1.5 s .. end
+        auto last = play (62);    // D3: the last slice = 1.5 s .. end
         CHECK (mag (last, L + 200, (int) (0.4 * rate)) > 0.01f && mag (last, L + (int) (0.6 * rate), 4000) < 1e-4f, "last slice runs to the end of the phrase");
 
         p.removeSlice (0); p.removeSlice (0); p.removeSlice (0);
@@ -1462,7 +1463,7 @@ int main()
         auto* o1 = p.params.getParameter ("sliceOffset1");
         auto* o2 = p.params.getParameter ("sliceOffset2");
         CHECK (o1 != nullptr && o1->isAutomatable() && p.params.getParameter ("sliceOffset15") != nullptr, "15 automatable marker-offset parameters");
-        CHECK (o1->getName (64) == "C#3 slice offset" && p.params.getParameter ("sliceOffset15")->getName (64) == "D#4 slice offset",
+        CHECK (o1->getName (64) == "C3 slice offset" && p.params.getParameter ("sliceOffset15")->getName (64) == "D4 slice offset",
                "named for the key whose slice each marker starts");
         CHECK (std::abs (o1->getDefaultValue() - 0.5f) < 1e-6f && o1->getCurrentValueAsText() == "0%", "an offset lane starts at zero, in the middle");
 
@@ -1470,7 +1471,7 @@ int main()
         auto ms = [&] (juce::AudioProcessorParameter* prm, float v) { prm->setValueNotifyingHost (dynamic_cast<juce::RangedAudioParameter*> (prm)->convertTo0to1 (v)); };
         // Homes at 0.5 and 1.5 s in a 2 s phrase.
         ms (o1, 50.0f);
-        CHECK (near (sliceTimes (p), { 0.995, 1.5 }), "+50% moves C#3's marker half way to D3's");
+        CHECK (near (sliceTimes (p), { 0.995, 1.5 }), "+50% moves C3's marker half way to C#3's");
         ms (o1, 100.0f);
         CHECK (near (sliceTimes (p), { 1.49, 1.5 }), "+100% takes it right up to the next marker");
         ms (o1, -100.0f);
@@ -1486,12 +1487,12 @@ int main()
         ms (o1, 0.0f); ms (o2, 0.0f);
 
         // Playback follows the offset.
-        ms (o1, 25.0f);    // C#3 slice now 0.7475 .. 1.5 s (0.7525 s long)
+        ms (o1, 25.0f);    // C3 slice now 0.7475 .. 1.5 s (0.7525 s long)
         run (p, 256, 500, {});
         juce::AudioBuffer<float> out (2, 256 * 450), blk (2, 256);
         for (int k = 0; k < 450; ++k)
         {
-            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 61, (juce::uint8) 100), 0);
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
             p.processBlock (blk, m);
             for (int ch = 0; ch < 2; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
         }

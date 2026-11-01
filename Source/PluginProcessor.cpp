@@ -161,12 +161,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     // Slice marker offsets: each marker's automatable move from its home, 0 in the middle of
     // the lane; +100% = right up to the next marker (or the end of the audio), -100% = back to
     // the previous one (or the start). Named for the key whose slice the marker starts (marker 1
-    // starts C#3 ... marker 15 starts D#4). The note comes first: VST3 hosts also get an
+    // starts C3 ... marker 15 starts D4). The note comes first: VST3 hosts also get an
     // 8-character short name, and Live tells parameters apart by it.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
             juce::ParameterID { "sliceOffset" + juce::String (i), 1 },
-            juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " slice offset",
+            juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i - 1, true, true, 3) + " slice offset",
             juce::NormalisableRange<float> (-100.0f, 100.0f), 0.0f,
             juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
                 { return std::abs (v) < 0.5f ? juce::String ("0%") : (v > 0 ? "+" : "") + juce::String (juce::roundToInt (v)) + "%"; })));

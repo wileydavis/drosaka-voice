@@ -73,7 +73,7 @@ public:
 
     // Slicing (message thread). Markers are seconds on the phrase timeline.
     // Markers: a home position each (edited here, saved with the set) plus an automatable
-    // offset parameter per marker ("C#3 slice offset" ...), 0 = the middle of the lane.
+    // offset parameter per marker ("C3 slice offset" ...), 0 = the middle of the lane.
     void addSlice (double seconds);
     void moveSlice (int index, double seconds);       // index in time order; clamped between neighbours
     void removeSlice (int index);

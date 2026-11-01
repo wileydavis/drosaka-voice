@@ -246,8 +246,8 @@ public:
         g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
         for (int k = 0; k < regions; ++k)
         {
-            const double a0 = k == 0 ? 0.0 : sl.t[k - 1];
-            const double a1 = k < sl.n ? sl.t[k] : len;
+            const double a0 = sl.t[k];
+            const double a1 = k + 1 < sl.n ? sl.t[k + 1] : len;
             const auto r = juce::Rectangle<float> (xOf (a0), (float) area.getY(), xOf (a1) - xOf (a0), (float) area.getHeight());
             if (k % 2 == 1) { g.setColour (colours::slice.withAlpha (0.06f)); g.fillRect (r); }
             g.setColour (colours::slice);
@@ -268,6 +268,13 @@ public:
             if (t < 0.0 || t >= dur) continue;
             const int bi = juce::jlimit (0, bins - 1, (int) (t / dur * bins));
             g.drawVerticalLine (area.getX() + x, midY - prim.peaks[(size_t) bi * 2 + 1] * halfH, midY - prim.peaks[(size_t) bi * 2] * halfH + 1.0f);
+        }
+
+        // Before the first marker is dead space (never played): dimmed over the waveform.
+        if (sl.n > 0)
+        {
+            g.setColour (colours::bg.withAlpha (0.55f));
+            g.fillRect (juce::Rectangle<float> ((float) area.getX(), (float) area.getY(), xOf (sl.t[0]) - (float) area.getX(), (float) area.getHeight()));
         }
 
         // Markers.
