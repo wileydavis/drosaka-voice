@@ -64,6 +64,7 @@ public:
     void setPrimary (int stemIndex);
     void setMute (int stemIndex, bool);
     void setSolo (int stemIndex, bool);
+    void setStemGain (int stemIndex, float dB);   // level trim per stem, -24..+12 dB
     void setSortAxis (SortAxis);
 
     // Alignment (all message thread).
@@ -170,6 +171,7 @@ private:
         std::vector<float> delay;   // dry path, delayed by the codec latency
         int delayPos = 0;
         float encode = 0.0f;        // smoothed 0 = dry .. 1 = codec
+        float trim = 1.0f;          // smoothed stem gain trim (linear)
         float hSemis = 0.0f, hPull = 0.0f, hStrength = 0.0f, hDetune = 0.0f, hDrift = 0.0f;   // smoothed harmony (Spread)
         harmony::PitchMap map;      // where this voice's pitch periods go, this chunk
         float psolaMix = 0.0f;      // 0 = direct playback .. 1 = pitch-shifted (PSOLA)

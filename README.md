@@ -37,6 +37,8 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 ### Milestone 10 behaviour (as built)
 
+**Stem gain:** each row has a **gain** cell to even out stems recorded at different levels: drag it up or down (Shift for fine), double-click for 0 dB. Range −24 to +12 dB. It saves with the set, and each bank keeps its own.
+
 **Banks** (1–4 in the header, or the **Bank** parameter). One instance holds four phrases. Each bank has its own stems, markers and settings: every knob, menu and switch except BANK, REC and DROP, so Play mode, Latch, Scheme, Tune root and the rest are per bank.
 - **Switching** lands on the next bar line while Live plays, and at once when it's stopped. A pulsing number is waiting for the bar; a lit one is playing; a dim one is empty
 - **Leaving a bank keeps it** exactly as you left it, tweaks included. A bank you open for the first time starts with the settings you had

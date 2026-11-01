@@ -109,6 +109,7 @@ struct VoiceFlags
     double offsetSec = 0.0;       // applied time shift (+ = later)
     double autoOffsetSec = 0.0;   // what auto-align found (double-click resets to it)
     AlignState align = AlignState::reference;
+    float gainDb = 0.0f;          // level trim, -24..+12 dB, to even out the stems
 };
 
 //==============================================================================

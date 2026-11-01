@@ -218,6 +218,7 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
         d.delay.assign ((size_t) ringLen, 0.0f);
         d.delayPos = 0;
         d.encode = 0.0f;
+        d.trim = 1.0f;
         d.hSemis = d.hPull = d.hStrength = d.hDetune = d.hDrift = d.psolaMix = 0.0f;
         d.depthRing.assign ((size_t) juce::nextPowerOfTwo ((int) (0.015 * sampleRate) + 4), 0.0f);
         d.depthPos = 0;
@@ -387,6 +388,14 @@ void DrosakaVoiceProcessor::setSolo (int idx, bool on)
     if (idx < 0 || idx >= b->size()) return;
     b->flags[(size_t) idx].solo = on;
     swapBank (b);
+}
+
+void DrosakaVoiceProcessor::setStemGain (int idx, float dB)
+{
+    auto b = getBank()->clone();
+    if (idx < 0 || idx >= b->size()) return;
+    b->flags[(size_t) idx].gainDb = juce::jlimit (-24.0f, 12.0f, dB);
+    swapBank (b, false);
 }
 
 void DrosakaVoiceProcessor::autoAlign (Bank& b, int idx)
@@ -1326,7 +1335,11 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
             vd.encode = approach (vd.encode, te[s], eStep);
             panGains (st.curPan, l1, r1);
             const float g1 = st.curGain, e1 = vd.encode;
-            l0 *= g0; r0 *= g0; l1 *= g1; r1 *= g1;
+            // The stem's own level trim, glided so dragging it doesn't click.
+            const float t0 = vd.trim;
+            vd.trim = approach (vd.trim, juce::Decibels::decibelsToGain (b.flags[(size_t) s].gainDb), (float) (4.0 * num / (0.05 * hostRate)));
+            const float t1 = vd.trim;
+            l0 *= g0 * t0; r0 *= g0 * t0; l1 *= g1 * t1; r1 *= g1 * t1;
 
             // Codec runs on every voice continuously, so a voice switching to it is already warm.
             const float* dry = dryBuf.getReadPointer (s);
@@ -1436,6 +1449,7 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
             v.setProperty ("offset", f.offsetSec, nullptr);
             v.setProperty ("autoOffset", f.autoOffsetSec, nullptr);
             v.setProperty ("align", (int) f.align, nullptr);
+            if (f.gainDb != 0.0f) v.setProperty ("gainDb", f.gainDb, nullptr);
             if (st.flac.getSize() > 0) v.setProperty ("flac", juce::var (st.flac), nullptr);
             bankTree.appendChild (v, nullptr);
         }
@@ -1584,6 +1598,7 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             fl.offsetSec = (double) v.getProperty ("offset", 0.0);
             fl.autoOffsetSec = (double) v.getProperty ("autoOffset", 0.0);
             fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
+            fl.gainDb = juce::jlimit (-24.0f, 12.0f, (float) v.getProperty ("gainDb", 0.0f));
             into.flags.push_back (fl);
         }
         // Sets from before markers were parameters: seconds in the bank tree.

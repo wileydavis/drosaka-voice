@@ -35,11 +35,11 @@ namespace
 
 //==============================================================================
 // One stem in the sorted list:
-//   [level + name] [alignment lane: drag to nudge] [codec order] [pitch formant] [P M S x]
+//   [level + name] [alignment lane: drag to nudge] [gain trim] [codec order] [pitch formant] [P M S x]
 class VoiceRow : public juce::Component
 {
 public:
-    struct Cols { juce::Rectangle<int> name, lane, order, info, buttons; };
+    struct Cols { juce::Rectangle<int> name, lane, gain, order, info, buttons; };
 
     static Cols columns (juce::Rectangle<int> r)
     {
@@ -47,6 +47,7 @@ public:
         c.buttons = r.removeFromRight (4 * 26 + 4);
         c.info = r.removeFromRight (150);
         c.order = r.removeFromRight (34);
+        c.gain = r.removeFromRight (58);
         c.name = r.removeFromLeft (140);
         r.removeFromLeft (6);
         c.lane = r.reduced (0, 3);
@@ -117,6 +118,22 @@ public:
 
         paintLane (g, c.lane, *bank);
 
+        // Gain trim: drag up/down, double-click for 0 dB.
+        {
+            const float db = bank->flags[(size_t) idx].gainDb;
+            auto gr = c.gain.reduced (4, 7);
+            g.setColour (colours::bg);
+            g.fillRoundedRectangle (gr.toFloat(), 3.0f);
+            const float zero = (float) gr.getX() + (float) gr.getWidth() * (24.0f / 36.0f);   // -24..+12
+            const float at = (float) gr.getX() + (float) gr.getWidth() * ((db + 24.0f) / 36.0f);
+            g.setColour (colours::wave.withAlpha (std::abs (db) < 0.05f ? 0.12f : 0.3f));
+            g.fillRect (juce::Rectangle<float> (juce::jmin (zero, at), (float) gr.getY(), std::abs (at - zero), (float) gr.getHeight()));
+            g.setFont (juce::FontOptions (11.0f));
+            g.setColour (std::abs (db) < 0.05f ? colours::dim : colours::wave);
+            g.drawText (std::abs (db) < 0.05f ? juce::String ("0 dB") : (db > 0 ? "+" : "") + juce::String (db, 1),
+                        gr, juce::Justification::centred);
+        }
+
         const int rank = proc.getVoiceEncodeRank (idx);
         g.setFont (juce::FontOptions (11.0f));
         g.setColour (enc > 0.5f ? colours::codec : colours::dim.withAlpha (0.6f));
@@ -127,6 +144,13 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (columns (getLocalBounds()).gain.contains (e.getPosition()))
+        {
+            auto bank = getBank();
+            gainDragging = true;
+            dragStartGain = bank->flags[(size_t) idx].gainDb;
+            return;
+        }
         if (! columns (getLocalBounds()).lane.contains (e.getPosition())) return;
         auto bank = getBank();
         dragging = true;
@@ -136,6 +160,15 @@ public:
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (gainDragging)
+        {
+            // Up = louder: 0.25 dB per pixel (shift: 0.05), in 0.1 dB steps.
+            const float perPx = e.mods.isShiftDown() ? 0.05f : 0.25f;
+            const float db = dragStartGain - (float) e.getDistanceFromDragStartY() * perPx;
+            proc.setStemGain (idx, std::round (db * 10.0f) / 10.0f);
+            repaint();
+            return;
+        }
         if (! dragging) return;
         const auto lane = columns (getLocalBounds()).lane;
         const double secPerPx = (timeline.end - timeline.start) / juce::jmax (1, lane.getWidth());
@@ -145,6 +178,7 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        gainDragging = false;
         dragging = false;
         timeline.frozen = false;
     }
@@ -152,6 +186,7 @@ public:
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
         if (columns (getLocalBounds()).lane.contains (e.getPosition())) proc.resetOffset (idx);
+        if (columns (getLocalBounds()).gain.contains (e.getPosition())) { proc.setStemGain (idx, 0.0f); repaint(); }
     }
 
 private:
@@ -212,6 +247,8 @@ private:
     juce::String name, info;
     bool isPrimary = false, dragging = false;
     double dragStartOffset = 0.0;
+    bool gainDragging = false;
+    float dragStartGain = 0.0f;
     juce::TextButton primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
 };
 
@@ -910,6 +947,7 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         auto cols = VoiceRow::columns ({ listView.getX(), listView.getY() - 22, listView.getMaximumVisibleWidth(), 18 });
         g.drawText ("pitch       formant", cols.info.withTrimmedRight (8), juce::Justification::centredRight);
         g.drawText ("codec", cols.order, juce::Justification::centred);
+        g.drawText ("gain", cols.gain, juce::Justification::centred);
         g.drawText ("alignment to primary  (drag, shift = fine, double-click = reset)", cols.lane, juce::Justification::centredLeft);
     }
 

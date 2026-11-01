@@ -1888,6 +1888,40 @@ int main()
 
     }
 
+    std::printf ("stem gain trim\n");
+    {
+        auto fA = writeWav ("gt_a.wav", voiceTone (140.0f, 0.4f, rate, (int) (rate * 1.5)), rate);
+        auto fB = writeWav ("gt_b.wav", voiceTone (200.0f, 0.4f, rate, (int) (rate * 1.5)), rate);
+        DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fA.getFullPathName(), fB.getFullPathName() }, errs);
+        p.setSolo (1, true);
+        auto level = [&]
+        {
+            run (p, 256, 400, {});
+            auto o = run (p, 256, 200, { 0 });
+            return o.getRMSLevel (0, 4800, 40000) + o.getRMSLevel (1, 4800, 40000);
+        };
+        const float at0 = level();
+        p.setStemGain (1, -6.0f);
+        const float atM6 = level();
+        p.setStemGain (1, 6.0f);
+        const float atP6 = level();
+        std::printf ("       -6 dB: %+.2f dB, +6 dB: %+.2f dB\n", 20 * std::log10 (atM6 / at0), 20 * std::log10 (atP6 / at0));
+        CHECK (std::abs (20 * std::log10 (atM6 / at0) + 6.0) < 0.2 && std::abs (20 * std::log10 (atP6 / at0) - 6.0) < 0.2, "a stem's gain trim sets its level");
+        p.setStemGain (1, 40.0f);
+        CHECK (p.getBank()->flags[1].gainDb == 12.0f, "trim is limited to -24..+12 dB");
+        p.setStemGain (1, -4.5f);
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256); q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (std::abs (q.getBank()->flags[1].gainDb + 4.5f) < 1e-4f && q.getBank()->flags[0].gainDb == 0.0f, "trims save with the set");
+        auto setq = [&] (const char* id, float v) { auto* prm = q.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        setq ("bank", 1.0f); run (q, 256, 1, {});
+        q.addStems ({ fA.getFullPathName() }, errs);
+        q.setStemGain (0, 3.0f);
+        setq ("bank", 0.0f); run (q, 256, 1, {});
+        CHECK (std::abs (q.getBank()->flags[1].gainDb + 4.5f) < 1e-4f && q.getBank()->flags[0].gainDb == 0.0f, "each bank keeps its own trims");
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");
