@@ -36,14 +36,15 @@ enum class AlignState { reference = 0, autoAligned = 1, unsure = 2, manual = 3 }
 //==============================================================================
 // Slice markers, resolved for use (seconds on the phrase timeline, in order).
 // Each marker k has a home position ('base', set on the waveform, saved with the set) plus
-// an automatable offset (parameter "<note> slice offset", 0 in the middle of the lane,
-// +-500 ms). Marker k always starts the slice on key C3 + k + 1, so each offset parameter
-// always means one note. N markers make N+1 regions; region k plays on C3 + k.
+// an automatable offset (parameter "<note> slice offset", 0 in the middle of the lane):
+// +100% reaches the next marker's home (or the end of the audio), -100% the previous
+// marker's home (or the start). Marker k always starts the slice on key C3 + k + 1, so
+// each offset parameter always means one note. N markers make N+1 regions on C3 + k.
 struct SliceSet
 {
     static constexpr int maxMarkers = 15;
-    static constexpr float maxOffsetMs = 500.0f;
-    double t[maxMarkers] {};      // effective time (base + offset, kept in order)
+    static constexpr double gap = 0.01;   // how close a fully offset marker gets to its neighbour (s)
+    double t[maxMarkers] {};      // effective time (kept in order)
     double base[maxMarkers] {};   // home position
     int slot[maxMarkers] {};      // which marker/parameter (0 = the C#3 one)
     int n = 0;
@@ -61,15 +62,34 @@ struct SliceSet
         if (k < n) endSec = t[k];
     }
 
-    // bases: seconds, packed and ascending, 0 = unused. offsetsMs: per marker.
-    // A marker offset past its neighbour stops just after it (never overtakes).
-    static SliceSet resolve (const float* bases, const float* offsetsMs, double lengthSec)
+    // Where a marker with this home and offset (-1..1) sits, given its neighbours' homes.
+    static double place (double home, double offset, double prevHome, double nextHome)
+    {
+        return offset >= 0.0 ? home + offset * std::max (0.0, nextHome - home - gap)
+                             : home + offset * std::max (0.0, home - prevHome - gap);
+    }
+
+    // The home that puts a marker at 'target' with this offset (for dragging).
+    static double homeFor (double target, double offset, double prevHome, double nextHome)
+    {
+        if (std::abs (offset) > 0.99) return target;   // pinned against a neighbour: just move the home
+        return offset >= 0.0 ? (target - offset * (nextHome - gap)) / (1.0 - offset)
+                             : (target + offset * (prevHome + gap)) / (1.0 + offset);
+    }
+
+    // bases: seconds, packed and ascending, 0 = unused. offsets: -1..1 per marker.
+    // A marker pushed past its neighbour stops just after it (never overtakes).
+    static SliceSet resolve (const float* bases, const float* offsets, double lengthSec)
     {
         SliceSet s;
-        for (int i = 0; i < maxMarkers; ++i)
+        int count = 0;
+        while (count < maxMarkers && bases[count] > 0.0f) ++count;
+        for (int i = 0; i < count; ++i)
         {
-            if (bases[i] <= 0.0f) break;
-            double t = juce::jlimit (0.003, juce::jmax (0.003, lengthSec - 0.003), (double) bases[i] + offsetsMs[i] * 0.001);
+            const double prev = i > 0 ? bases[i - 1] : 0.0;
+            const double next = i + 1 < count ? bases[i + 1] : lengthSec;
+            double t = place (bases[i], juce::jlimit (-1.0, 1.0, (double) offsets[i]), prev, next);
+            t = juce::jlimit (0.003, juce::jmax (0.003, lengthSec - 0.003), t);
             if (s.n > 0) t = std::max (t, s.t[s.n - 1] + 0.008);
             if (t >= lengthSec - 0.002) break;
             s.t[s.n] = t; s.base[s.n] = bases[i]; s.slot[s.n] = i; ++s.n;

@@ -141,17 +141,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
     // Record a take from the sidechain input (automatable: punch in on a cue).
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "record", 1 }, "Record take", false));
 
-    // Slice marker offsets: each marker's automatable nudge from its home position,
-    // 0 in the middle of the lane, + later / - earlier, up to 500 ms. Named for the key whose
-    // slice the marker starts (marker 1 starts C#3 ... marker 15 starts D#4). The note comes
-    // first: VST3 hosts also get an 8-character short name, and Live tells parameters apart by it.
+    // Slice marker offsets: each marker's automatable move from its home, 0 in the middle of
+    // the lane; +100% = right up to the next marker (or the end of the audio), -100% = back to
+    // the previous one (or the start). Named for the key whose slice the marker starts (marker 1
+    // starts C#3 ... marker 15 starts D#4). The note comes first: VST3 hosts also get an
+    // 8-character short name, and Live tells parameters apart by it.
     for (int i = 1; i <= SliceSet::maxMarkers; ++i)
         layout.add (std::make_unique<juce::AudioParameterFloat> (
             juce::ParameterID { "sliceOffset" + juce::String (i), 1 },
             juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + i, true, true, 3) + " slice offset",
-            juce::NormalisableRange<float> (-SliceSet::maxOffsetMs, SliceSet::maxOffsetMs), 0.0f,
+            juce::NormalisableRange<float> (-100.0f, 100.0f), 0.0f,
             juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
-                { return std::abs (v) < 0.5f ? juce::String ("0 ms") : (v > 0 ? "+" : "") + juce::String (juce::roundToInt (v)) + " ms"; })));
+                { return std::abs (v) < 0.5f ? juce::String ("0%") : (v > 0 ? "+" : "") + juce::String (juce::roundToInt (v)) + "%"; })));
     return layout;
 }
 
@@ -398,7 +399,7 @@ void DrosakaVoiceProcessor::resetOffset (int idx)
 SliceSet DrosakaVoiceProcessor::getSlices() const
 {
     float bases[SliceSet::maxMarkers], offs[SliceSet::maxMarkers];
-    for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load(); }
+    for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load() * 0.01f; }
     return SliceSet::resolve (bases, offs, getBank()->lengthSeconds());
 }
 
@@ -416,10 +417,10 @@ void DrosakaVoiceProcessor::setBases (const std::vector<double>& bases)
     ++bankGeneration;   // redraw
 }
 
-void DrosakaVoiceProcessor::setOffsetMs (int slot, float ms)
+void DrosakaVoiceProcessor::setOffsetPct (int slot, float pct)
 {
     auto* prm = params.getParameter ("sliceOffset" + juce::String (slot + 1));
-    const float v = prm->convertTo0to1 (juce::jlimit (-SliceSet::maxOffsetMs, SliceSet::maxOffsetMs, ms));
+    const float v = prm->convertTo0to1 (juce::jlimit (-100.0f, 100.0f, pct));
     if (std::abs (prm->getValue() - v) < 1e-7f) return;
     prm->beginChangeGesture();
     prm->setValueNotifyingHost (v);
@@ -443,8 +444,8 @@ void DrosakaVoiceProcessor::addSlice (double sec)
     for (int i = 0; i < SliceSet::maxMarkers; ++i) offs.push_back (sliceOffsetParams[i]->load());
     bases.insert (bases.begin() + k, sec);
     setBases (bases);
-    for (int i = SliceSet::maxMarkers - 1; i > k; --i) setOffsetMs (i, offs[(size_t) i - 1]);
-    setOffsetMs (k, 0.0f);
+    for (int i = SliceSet::maxMarkers - 1; i > k; --i) setOffsetPct (i, offs[(size_t) i - 1]);
+    setOffsetPct (k, 0.0f);
 }
 
 void DrosakaVoiceProcessor::moveSlice (int i, double sec)
@@ -457,9 +458,12 @@ void DrosakaVoiceProcessor::moveSlice (int i, double sec)
     if (hi <= lo) return;
     // The marker lands where it's dragged: move its home, keep its offset.
     auto bases = currentBases();
-    const double offset = sliceOffsetParams[sl.slot[i]]->load() * 0.001;
-    bases[(size_t) sl.slot[i]] = juce::jmax (0.004, juce::jlimit (lo, hi, sec) - offset);
-    std::sort (bases.begin(), bases.end());
+    const int k = sl.slot[i];
+    const double offset = sliceOffsetParams[k]->load() * 0.01;
+    const double prev = k > 0 ? bases[(size_t) k - 1] : 0.0;
+    const double next = k + 1 < (int) bases.size() ? bases[(size_t) k + 1] : len;
+    const double home = SliceSet::homeFor (juce::jlimit (lo, hi, sec), offset, prev, next);
+    bases[(size_t) k] = juce::jlimit (prev + 0.004, next - 0.004, home);
     setBases (bases);
 }
 
@@ -473,7 +477,7 @@ void DrosakaVoiceProcessor::removeSlice (int i)
     for (int j = 0; j < SliceSet::maxMarkers; ++j) offs.push_back (sliceOffsetParams[j]->load());
     bases.erase (bases.begin() + k);
     setBases (bases);
-    for (int j = k; j < SliceSet::maxMarkers; ++j) setOffsetMs (j, j + 1 < SliceSet::maxMarkers ? offs[(size_t) j + 1] : 0.0f);
+    for (int j = k; j < SliceSet::maxMarkers; ++j) setOffsetPct (j, j + 1 < SliceSet::maxMarkers ? offs[(size_t) j + 1] : 0.0f);
 }
 
 void DrosakaVoiceProcessor::setSortAxis (SortAxis a)
@@ -837,7 +841,7 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const int n = juce::jmin (b.size(), maxVoices);
     {
         float bases[SliceSet::maxMarkers], offs[SliceSet::maxMarkers];
-        for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load(); }
+        for (int i = 0; i < SliceSet::maxMarkers; ++i) { bases[i] = sliceBase[i].load(); offs[i] = sliceOffsetParams[i]->load() * 0.01f; }
         liveSlices = SliceSet::resolve (bases, offs, b.lengthSeconds());
     }
     liveTune.amount = tuneAmountParam->load();

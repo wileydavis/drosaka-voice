@@ -38,7 +38,7 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 ### Milestone 10 behaviour (as built)
 
 **Slice markers are automatable, as offsets.** Each marker has a **home** position, set by placing or dragging it on the waveform and saved with the set. Each also has an automatable **offset** parameter named for the key whose slice it starts: *C#3 slice offset*, *D3 slice offset* … *D#4 slice offset*. (C3's slice always starts at the top.)
-- **The lane:** an offset lane starts at **0 in the middle**. Up moves the marker later and down moves it earlier, up to ±500 ms
+- **The lane:** an offset lane starts at **0 in the middle**. Up moves the marker later and down moves it earlier. The range is the marker's own room: **+100%** takes it right up to the next marker (or, for the last marker, the end of the audio), and **−100%** takes it back to the previous marker (or the start). ±50% is halfway
 - **Display:** on the waveform, an offset marker shows where it is now, with a faint line back to its home
 - **No overtaking:** offsets can't push a marker past its neighbour; it stops just after it
 - **Dragging** a marker moves its home and keeps its offset, so it lands where you drop it

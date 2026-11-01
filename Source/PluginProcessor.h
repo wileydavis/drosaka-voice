@@ -253,7 +253,7 @@ private:
     std::atomic<float> sliceBase[SliceSet::maxMarkers] {};        // seconds, packed ascending, 0 = unused
     std::atomic<float>* sliceOffsetParams[SliceSet::maxMarkers] {};
     void setBases (const std::vector<double>& bases);
-    void setOffsetMs (int slot, float ms);
+    void setOffsetPct (int slot, float pct);
     std::vector<double> currentBases() const;
     void fireHit (const pattern::Hit&, const Bank&, double bpm);
     juce::int64 lastEncodeStep = std::numeric_limits<juce::int64>::min();
