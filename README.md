@@ -52,6 +52,25 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 - **Dry voices** are retuned period by period with the same pitch-shifting as Spread (formants and timing kept), and encoded voices are retuned inside the codec. It stacks with Spread and Screwed
 - TUNE is MIDI-learnable like the grid knobs
 
+**Harmony Spread** (replaces the relative intervals below; SPREAD, SNAP, CHORD, plus DRIFT in the Performance panel). The crowd now sings real notes on the **Tune ROOT**, and the primary stays human:
+- **natural → chorus → chord → cluster:** at *chorus*, every crowd voice sings the root, each in the octave nearest its own register, slightly detuned and drifting, so it beats and shimmers like a choir on one note. At *chord*, the voices take the CHORD menu's tones on the root (C minor triad on a C root sings C, E♭, G). At *cluster*, they take neighbouring notes of the Tune SCALE
+- **Harmony keys C1–B1:** hold notes in that octave and the crowd sings them instead of the menu chord, spread low to high across the voices. Holding keys lifts Spread to at least *chord*, even from 0. Let go and the menu chord comes back. These keys don't trigger the phrase or patterns
+- **DRIFT:** each voice wanders slowly in pitch, up to about ±28 cents. It's strongest at *chorus*. At 0 the detune is static
+- **No voice moves more than 6 semitones**, because each sings its note in its nearest octave. Dry and encoded voices sing the same notes, so the octave jump on encoding is gone
+- **TUNE** still works on its own at *natural*, and it's the only pitch effect on the primary
+- Each row shows the note its voice is singing
+
+Spread tour without Live: `DrosakaVoiceRender --spread out.wav primary.wav others...` renders natural, chorus, C-minor chord, cluster, a slow sweep, harmony keys E1+A1, then the encoded chord. Set `DV_CROWD_ONLY=1` to mute the primary.
+
+### Harmony Spread test in Live
+
+1. Set ROOT to your track's key, Count to all, then sweep **SPREAD** slowly: speech, then a shimmering unison on the root, then the chord, then the cluster
+2. At *chord*, hold two or three notes on **C1–B1** with your left hand while triggering the phrase with your right: the crowd follows your chord changes
+3. Turn **DRIFT** from 0 to 100% at *chorus*: from a static detune to a seasick choir. Where should the default sit?
+4. Set **SCALE** to Minor or Major and go to *cluster*: does a scale cluster read better than the old semitone smear?
+5. Encode some voices at *chord*: they should stay on the same notes
+6. Judgement calls: is the chorus detune too wide, or too narrow? Do you want the primary able to join the harmony as an option?
+
 **Recording takes:**
 1. In Live, open the device's **Sidechain** section (the triangle at the left of the device, or the device title bar for AU), switch it on, and pick the track to record from, such as a mic track, in *Audio From*. The meter under REC is always live: "input −xx dB" means audio is arriving, "no input" means Live isn't sending any, and "input silent" means the route is there but quiet
 2. Press **REC** in the Performance panel. The meter shows the input and the timer counts up
@@ -148,7 +167,7 @@ Space tour without Live: `DrosakaVoiceRender --space out.wav primary.wav others.
 4. Change Live's tempo: the motion follows
 5. Judgement calls: keep Orbit and Swap? Add depth cues (level, short delay, reverb on outer voices), or stay with pure panning?
 
-### Milestone 5 behaviour (as built)
+### Milestone 5 behaviour (as built, superseded by Harmony Spread above)
 
 - **SPREAD** (automatable) moves the crowd from unison to chorus to chord to cluster. Every voice glides continuously, and the primary never moves
 - **CHORD:** Fifths, Minor triad, Major triad, Stacked fourths, Minor 7th or Octaves. Voices above the primary take the chord's upper tones and voices below take its lower ones, with the outer pairs widest
@@ -157,7 +176,6 @@ Space tour without Live: `DrosakaVoiceRender --space out.wav primary.wav others.
 - **Encoded voices** play the full interval through the codec, up to ±24. A voice can therefore jump an octave at the moment it's encoded: "the codec covers the rest"
 - Each row shows its current interval in semitones
 
-Spread tour without Live: `DrosakaVoiceRender --spread out.wav primary.wav others...` renders unison, chorus, chord, cluster, a slow sweep, then the encoded chord.
 
 ### Milestone 5 test in Live
 

@@ -49,7 +49,7 @@ private:
     juce::ComboBox playModeBox, pitchLockBox, quantBox, tuneRootBox, tuneScaleBox;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment, pitchLockAttachment, quantAttachment,
                                                                             tuneRootAttachment, tuneScaleAttachment;
-    std::unique_ptr<KnobCell> tuneCell;
+    std::unique_ptr<KnobCell> tuneCell, driftCell;
     juce::TextButton recordButton { "REC" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> recordAttachment;
     juce::String lastRecordMessage;

@@ -2,7 +2,7 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <array>
-#include "Tune.h"
+#include "Harmony.h"
 
 // Military-codec voice: an LPC-10-style vocoder running at 8 kHz.
 //   analysis:  pre-emphasis, 240-sample Hamming window every 180 samples (22.5 ms),
@@ -30,8 +30,8 @@ public:
     // Spread: transpose the excitation (the LPC envelope, i.e. the formants, stays put).
     void setPitchRatio (float r) { pitchRatio = juce::jlimit (0.25f, 4.0f, r); }
 
-    // Autotune the excitation pitch (voiceCentre = the voice's median pitch, for Root mode).
-    void setTune (const tune::Spec& t, float voiceCentre) { tuneSpec = t; tuneCentre = voiceCentre; }
+    // Where each frame's pitch should go: harmony target (Spread) or autotune (Tune).
+    void setPitchMap (const harmony::PitchMap& m) { pitchMap = m; }
 
     void process (const float* in, float* out, int numSamples);
 
@@ -84,8 +84,7 @@ private:
 
     // Parameters.
     float bitRate = 0.35f, frameDrop = 0.0f, fixedPitch = 110.0f, pitchRatio = 1.0f;
-    tune::Spec tuneSpec;
-    float tuneCentre = 0.0f;
+    harmony::PitchMap pitchMap;
     PitchLock lock = PitchLock::tracking;
 
     juce::Random rng;

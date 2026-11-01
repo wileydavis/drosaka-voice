@@ -9,6 +9,7 @@
 #include "Spread.h"
 #include "Spatial.h"
 #include "Pattern.h"
+#include "Harmony.h"
 
 //==============================================================================
 // Voice bank (M2) + codec (M3).
@@ -137,11 +138,13 @@ public:
         return stemIndex >= 0 && stemIndex < maxVoices ? voicePan[stemIndex].load() : 0.0f;
     }
 
-    // Current pitch offset per stem (semitones, as heard: dry/codec blend), for the UI.
-    float getVoiceSemis (int stemIndex) const
+    // The note a voice is being sung on by Spread's harmony (MIDI note number), or -1.
+    float getVoiceNote (int stemIndex) const
     {
-        return stemIndex >= 0 && stemIndex < maxVoices ? voiceSemis[stemIndex].load() : 0.0f;
+        return stemIndex >= 0 && stemIndex < maxVoices ? voiceNote[stemIndex].load() : -1.0f;
     }
+    // Pitch classes held on the harmony keys (C1-B1), for the UI.
+    bool isHarmonyHeld (int pitchClass) const { return harmonyCount[pitchClass].load() > 0; }
 
     // Bumped whenever the bank changes. structureGeneration only when rows must be
     // rebuilt (not for offset drags, which would otherwise kill the drag mid-gesture).
@@ -157,7 +160,8 @@ private:
         std::vector<float> delay;   // dry path, delayed by the codec latency
         int delayPos = 0;
         float encode = 0.0f;        // smoothed 0 = dry .. 1 = codec
-        float drySemis = 0.0f, codecSemis = 0.0f;   // smoothed Spread intervals
+        float hSemis = 0.0f, hPull = 0.0f, hStrength = 0.0f, hDetune = 0.0f, hDrift = 0.0f;   // smoothed harmony (Spread)
+        harmony::PitchMap map;      // where this voice's pitch periods go, this chunk
         float psolaMix = 0.0f;      // 0 = direct playback .. 1 = pitch-shifted (PSOLA)
         std::vector<float> depthRing;   // depth pre-delay
         int depthPos = 0;
@@ -192,7 +196,7 @@ private:
     void autoAlign (Bank& b, int stemIndex);
     void startInstance (double startPos, double lengthOut, double speed, float pitchSemis);
     // All stems, mono: direct playback into dryBuf, pitch-shifted into shiftBuf where asked.
-    void renderDry (int start, int num, Bank& bank, const float* psolaRatio, const bool* wantPsola);
+    void renderDry (int start, int num, Bank& bank, const bool* wantPsola);
 
     juce::AudioFormatManager formatManager;
 
@@ -215,7 +219,7 @@ private:
     std::atomic<float>* spreadParam = nullptr;
     std::atomic<float>* chordParam = nullptr;
     std::atomic<float>* snapParam = nullptr;
-    std::atomic<float> voiceSemis[maxVoices] {};
+    std::atomic<float> voiceNote[maxVoices] {};   // the note a crowd voice is singing (MIDI), or -1
     std::atomic<float> voicePan[maxVoices] {};
     std::atomic<float>* spatialParam = nullptr;
     std::atomic<float>* motionDivParam = nullptr;
@@ -245,8 +249,12 @@ private:
     int numPending = 0;
     bool held[128] {};
     void patternNote (const juce::MidiMessage&, double ppqAtEvent, const Bank&);
+    bool harmonyNote (const juce::MidiMessage&);
     SliceSet liveSlices;   // audio thread: the markers as of this block
     tune::Spec liveTune;   // audio thread: autotune as of this block
+    std::atomic<int> harmonyCount[12] {};   // held harmony keys per pitch class
+    std::atomic<float>* driftParam = nullptr;
+    double driftClock = 0.0;               // seconds, for the drift wander
     std::atomic<float>* tuneAmountParam = nullptr;
     std::atomic<float>* tuneRootParam = nullptr;
     std::atomic<float>* tuneScaleParam = nullptr;

@@ -332,8 +332,7 @@ void LpcCodec::runFrame()
             fr.voiced = fr.gain > 0.0f;
             break;
     }
-    if (tuneSpec.amount > 0.0f && fr.pitchHz > 0.0f)
-        fr.pitchHz *= tune::ratio (fr.pitchHz, tuneSpec.amount, tuneSpec.pitchClass, tuneSpec.scale, tuneCentre);
+    if (fr.pitchHz > 0.0f) fr.pitchHz *= harmony::ratio (fr.pitchHz, pitchMap);   // Spread harmony / Tune
     quantise (fr);
 
     // Packet loss on transmitted frames: bursty, overall loss ~= q.

@@ -42,6 +42,7 @@ DrosakaVoiceProcessor::DrosakaVoiceProcessor()
     tuneAmountParam = params.getRawParameterValue ("tuneAmount");
     tuneRootParam = params.getRawParameterValue ("tuneRoot");
     tuneScaleParam = params.getRawParameterValue ("tuneScale");
+    driftParam = params.getRawParameterValue ("drift");
     recordParam = params.getRawParameterValue ("record");
     takesFolder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("drosaka Voice").getChildFile ("Takes");
     spreadParam = params.getRawParameterValue ("spread");
@@ -94,7 +95,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
         juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f,
         juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
         {
-            const char* names[] = { "unison", "chorus", "chord", "cluster" };
+            const char* names[] = { "natural", "chorus", "chord", "cluster" };
             const float p = v * 3.0f;
             const int i = juce::jmin (3, juce::roundToInt (p));
             return std::abs (p - (float) i) < 0.05f ? juce::String (names[i]) : juce::String (juce::roundToInt (v * 100.0f)) + "%";
@@ -137,6 +138,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrosakaVoiceProcessor::creat
             { return v <= 0.001f ? juce::String ("off") : juce::String (juce::roundToInt (v * 100.0f)) + "%"; })));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneRoot", 1 }, "Tune root", tune::rootNames(), 0));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "tuneScale", 1 }, "Tune scale", tune::scaleNames(), 0));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "drift", 1 }, "Drift",
+        juce::NormalisableRange<float> (0.0f, 1.0f), 0.35f, pct));
 
     // Record a take from the sidechain input (automatable: punch in on a cue).
     layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "record", 1 }, "Record take", false));
@@ -183,7 +186,7 @@ void DrosakaVoiceProcessor::prepareToPlay (double sampleRate, int)
         d.delay.assign ((size_t) ringLen, 0.0f);
         d.delayPos = 0;
         d.encode = 0.0f;
-        d.drySemis = d.codecSemis = d.psolaMix = 0.0f;
+        d.hSemis = d.hPull = d.hStrength = d.hDetune = d.hDrift = d.psolaMix = 0.0f;
         d.depthRing.assign ((size_t) juce::nextPowerOfTwo ((int) (0.015 * sampleRate) + 4), 0.0f);
         d.depthPos = 0;
         d.depth = 0.0f;
@@ -513,7 +516,7 @@ void DrosakaVoiceProcessor::startInstance (double startPos, double lengthOut, do
     for (auto& p : in.psolaRaw) p = {};
 }
 
-void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float* psolaRatio, const bool* wantPsola)
+void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const bool* wantPsola)
 {
     const int n = juce::jmin (b.size(), maxVoices);
     const double lookahead = 0.025 * hostRate;   // longest grain half-length (a 40 Hz period)
@@ -568,9 +571,8 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
             };
 
             // PSOLA at output time o (samples since the hit), one grain per synthesis pitch mark.
-            const float centre = st.analysis.pitchHz;
-            const bool tuneThis = liveTune.amount > 0.001f;
-            auto psola = [&] (Psola& ps, double o, float ratio, bool applyTune) -> float
+            const auto& map = voiceDsp[s].map;
+            auto psola = [&] (Psola& ps, double o, float ratio, bool applyMap) -> float
             {
                 while (ps.nextSynth <= o + lookahead)
                 {
@@ -585,8 +587,8 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
 
                     const bool voiced = mk.voiced[idx] != 0;
                     float r = voiced ? ratio : 1.0f;
-                    if (voiced && applyTune && tuneThis)   // autotune each period toward its target
-                        r *= tune::ratio ((float) (st.sampleRate / mk.period[idx]), liveTune.amount, liveTune.pitchClass, liveTune.scale, centre);
+                    if (voiced && applyMap)   // Spread harmony / Tune: pull this period toward its note
+                        r *= harmony::ratio ((float) (st.sampleRate / mk.period[idx]), map);
                     const double half = mk.period[idx] / step;   // one period, in host samples
 
                     if (ps.count == 8) { for (int k = 1; k < 8; ++k) ps.grains[k - 1] = ps.grains[k]; ps.count = 7; }
@@ -622,14 +624,14 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
                 if (! forced || ! canPsola)
                 {
                     if (g > 0.0f) dst[j] += g * read (pos);
-                    if (wantPsola[s] && canPsola) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s], true);
+                    if (wantPsola[s] && canPsola) sdst[j] += g * psola (in.psola[s], o, 1.0f, true);
                 }
                 else
                 {
                     // dryBuf (which also feeds the codec) carries the hit's own pitch and time;
                     // shiftBuf adds Spread on top.
                     dst[j] += g * psola (in.psolaRaw[s], o, instRatio, false);   // the codec's feed: it retunes itself
-                    if (wantPsola[s]) sdst[j] += g * psola (in.psola[s], o, psolaRatio[s] * instRatio, true);
+                    if (wantPsola[s]) sdst[j] += g * psola (in.psola[s], o, instRatio, true);
                 }
             }
         }
@@ -638,6 +640,16 @@ void DrosakaVoiceProcessor::renderDry (int start, int num, Bank& b, const float*
         const double phraseNow = in.startPos + in.out * in.speed;
         if ((juce::exactlyEqual (in.envStep, 0.0f) && in.env <= 0.0f) || phraseNow >= phraseLen) in.active = false;
     }
+}
+
+// Harmony keys C1-B1: held notes become the chord the crowd sings. Returns true if consumed.
+bool DrosakaVoiceProcessor::harmonyNote (const juce::MidiMessage& msg)
+{
+    if (msg.isAllNotesOff() || msg.isAllSoundOff()) { for (auto& c : harmonyCount) c = 0; return false; }
+    if (! (msg.isNoteOn() || msg.isNoteOff()) || ! harmony::isHarmonyKey (msg.getNoteNumber())) return false;
+    auto& c = harmonyCount[msg.getNoteNumber() % 12];
+    c = msg.isNoteOn() ? c.load() + 1 : juce::jmax (0, c.load() - 1);
+    return true;
 }
 
 void DrosakaVoiceProcessor::patternNote (const juce::MidiMessage& msg, double ppqAt, const Bank&)
@@ -946,8 +958,15 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     std::sort (splits, splits + numSplits);
 
     // Spread targets (semitones): full interval for the codec, folded +-7 for dry voices.
-    float tCodecSemis[maxVoices], tDrySemis[maxVoices];
-    spread::compute (b, spreadParam->load(), (int) chordParam->load(), snapParam->load(), tCodecSemis, tDrySemis);
+    // Spread harmony targets for the crowd (the primary stays human).
+    harmony::Voice hv[maxVoices];
+    {
+        bool heldPc[12];
+        for (int pc = 0; pc < 12; ++pc) heldPc[pc] = harmonyCount[pc].load() > 0;
+        harmony::compute (b, spreadParam->load(), (int) chordParam->load(), snapParam->load(),
+                          liveTune.pitchClass, liveTune.scale, heldPc, hv);
+    }
+    const float driftAmount = driftParam->load();
 
         const auto lock = (LpcCodec::PitchLock) juce::jlimit (0, 2, (int) pitchLockParam->load());
     for (int s = 0; s < n; ++s)
@@ -969,7 +988,8 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         {
             // Notes at this sample start/stop the walk or queue a jump.
             for (; midiIt != midi.cend() && (*midiIt).samplePosition <= chunkStart; ++midiIt)
-                patternNote ((*midiIt).getMessage(), blockPpq + juce::jmax (0, (*midiIt).samplePosition) / spb, b);
+                if (! harmonyNote ((*midiIt).getMessage()))
+                    patternNote ((*midiIt).getMessage(), blockPpq + juce::jmax (0, (*midiIt).samplePosition) / spb, b);
 
             // Plan steps a chunk ahead, fire what's due, and end this chunk at the next hit.
             if (patternRunning)
@@ -1035,24 +1055,36 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const double cycle = ppqNow / motionGrid - std::floor (ppqNow / motionGrid);
         spatial::pans (mode, b, tpRadiate, tg, motionStep, cycle, tp);
 
-        // Spread glides (an octave takes 80 ms at most), and whether each voice needs PSOLA.
+        // Harmony glides (an octave takes 80 ms at most) and each voice's pitch map for this chunk.
         const float semiStep = (float) (12.0 * num / (0.08 * hostRate));
+        const float strengthStep = (float) (num / (0.05 * hostRate));
+        const float centsStep = (float) (1200.0 * num / (0.08 * hostRate));
         const float mixStep = (float) (num / (0.03 * hostRate));
-        float psolaRatio[maxVoices], mix0[maxVoices], mix1[maxVoices];
+        float mix0[maxVoices], mix1[maxVoices];
         bool wantPsola[maxVoices];
+        driftClock += num / hostRate;
         for (int s = 0; s < n; ++s)
         {
             auto& vd = voiceDsp[s];
-            vd.drySemis = approach (vd.drySemis, tDrySemis[s], semiStep);
-            vd.codecSemis = approach (vd.codecSemis, tCodecSemis[s], semiStep);
-            const float mixTarget = tuneOn || std::abs (tDrySemis[s]) > 0.005f || std::abs (vd.drySemis) > 0.005f ? 1.0f : 0.0f;
+            vd.hSemis = approach (vd.hSemis, hv[s].semis, semiStep);
+            vd.hPull = approach (vd.hPull, hv[s].pull, strengthStep);
+            vd.hStrength = approach (vd.hStrength, hv[s].strength, strengthStep);
+            vd.hDetune = approach (vd.hDetune, hv[s].detune, centsStep);
+            vd.hDrift = approach (vd.hDrift, hv[s].drift, strengthStep);
+            const float centre = b.stems[(size_t) s]->analysis.pitchHz;
+            vd.map.targetHz = harmony::rootTargetHz (liveTune.pitchClass, centre, vd.hSemis);
+            vd.map.pull = vd.hPull;
+            vd.map.strength = vd.hStrength;
+            vd.map.cents = vd.hDetune + harmony::driftCents (s, driftClock, driftAmount * vd.hDrift);
+            vd.map.tune = liveTune;
+            vd.map.centre = centre;
+            vd.codec.setPitchMap (vd.map);
+
+            const bool shifting = tuneOn || vd.hPull > 0.001f || hv[s].pull > 0.001f;
             mix0[s] = vd.psolaMix;
-            vd.psolaMix = approach (vd.psolaMix, mixTarget, mixStep);
+            vd.psolaMix = approach (vd.psolaMix, shifting ? 1.0f : 0.0f, mixStep);
             mix1[s] = vd.psolaMix;
             wantPsola[s] = mix0[s] > 0.0f || mix1[s] > 0.0f;
-            psolaRatio[s] = std::exp2 (vd.drySemis / 12.0f);
-            vd.codec.setPitchRatio (std::exp2 (vd.codecSemis / 12.0f));
-            vd.codec.setTune (liveTune, b.stems[(size_t) s]->analysis.pitchHz);
         }
 
         // Dry voices, with sample-accurate triggers inside this chunk.
@@ -1064,15 +1096,16 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             const auto meta = *midiIt;
             const int pos = meta.samplePosition - chunkStart;
             if (pos >= num) break;
+            if (harmonyNote (meta.getMessage())) continue;   // C1-B1: held notes set the harmony
             if (! meta.getMessage().isNoteOn()) continue;   // pitch, velocity, note-off ignored
             const int at = juce::jlimit (0, num, pos);
-            if (at > cursor) renderDry (cursor, at - cursor, b, psolaRatio, wantPsola);
+            if (at > cursor) renderDry (cursor, at - cursor, b, wantPsola);
             cursor = at;
             double a, z;
             liveSlices.region (meta.getMessage().getNoteNumber(), b.lengthSeconds(), a, z);   // a slice key, or the whole phrase
             startInstance (a * hostRate, (z - a) * hostRate, 1.0, 0.0f);
         }
-        if (cursor < num) renderDry (cursor, num - cursor, b, psolaRatio, wantPsola);
+        if (cursor < num) renderDry (cursor, num - cursor, b, wantPsola);
 
         // Glide each voice toward its targets over this chunk.
         const float gStep = (float) (num / (gainGlideSec * hostRate));
@@ -1166,7 +1199,8 @@ void DrosakaVoiceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         voicePan[s] = b.stems[(size_t) s]->curPan;
         voiceLevel[s] = b.stems[(size_t) s]->curGain;
         voiceEncode[s] = voiceDsp[s].encode;
-        voiceSemis[s] = voiceDsp[s].drySemis + voiceDsp[s].encode * (voiceDsp[s].codecSemis - voiceDsp[s].drySemis);
+        const auto& m = voiceDsp[s].map;
+        voiceNote[s] = m.pull > 0.5f ? 69.0f + 12.0f * std::log2 (m.targetHz * std::exp2 (m.cents / 1200.0f) / 440.0f) : -1.0f;
     }
     for (int s = n; s < maxVoices; ++s) { voiceLevel[s] = 0.0f; voiceEncode[s] = 0.0f; }
 

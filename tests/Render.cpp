@@ -1,3 +1,4 @@
+#include <cstdlib>
 // Renders a stem through the full plugin at a series of codec settings, for listening.
 //   DrosakaVoiceRender <stem.wav> <out-dir>
 // Writes one file per setting plus tour.wav (all of them in order, 0.6 s apart).
@@ -26,7 +27,7 @@ static int renderBuild (int argc, char** argv)
 
     const auto& st = *p.getBank()->stems[0];
     const int loopLen = (int) (st.audio.getNumSamples() * rate / st.sampleRate) + (int) (0.15 * rate);
-    const int loops = 6, total = loopLen * loops + p.getLatencySamples() + (int) rate;
+    const int loops = 7, total = loopLen * loops + p.getLatencySamples() + (int) rate;
     const int n = p.getBank()->size();
     juce::AudioBuffer<float> out (2, total), block (2, 512);
     for (int pos = 0; pos < total; pos += 512)
@@ -56,8 +57,9 @@ static int renderBuild (int argc, char** argv)
 }
 
 // Spread tour: DrosakaVoiceRender --spread <out.wav> <primary> <stems...>
-// Loops: unison, chorus, chord (minor triad), cluster, a slow sweep 0 -> 1 (Snap 0.5),
-// then the chord with the whole crowd encoded (codec plays the full intervals).
+// Loops (Tune root C): natural, chorus on C, C minor chord, cluster (C minor scale),
+// a slow sweep 0 -> 1 (Snap 0.5), then harmony keys E1+A1 held at Spread 0 (the crowd
+// sings E and A), then the C minor chord with the whole crowd encoded.
 static int renderSpread (int argc, char** argv)
 {
     const double rate = 48000.0;
@@ -67,20 +69,27 @@ static int renderSpread (int argc, char** argv)
     for (int i = 3; i < argc; ++i) paths.add (juce::File (argv[i]).getFullPathName());
     p.addStems (paths, errs);
     auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
-    set ("count", 1.0f); set ("chord", 1.0f); set ("snap", 0.5f); set ("bitRate", 0.45f);
+    set ("count", 1.0f); set ("chord", 1.0f); set ("snap", 0.5f); set ("bitRate", 0.45f); set ("tuneScale", 1.0f);
+    if (std::getenv ("DV_CROWD_ONLY") != nullptr) p.setMute (p.getBank()->primary, true);   // listen to the harmony alone
+    if (auto* solo = std::getenv ("DV_SOLO")) p.setSolo (juce::String (solo).getIntValue(), true);
 
     const auto& st = *p.getBank()->stems[0];
     const int loopLen = (int) (st.audio.getNumSamples() * rate / st.sampleRate) + (int) (0.3 * rate);
-    const int loops = 6, total = loopLen * loops + p.getLatencySamples() + (int) rate;
+    const int loops = 7, total = loopLen * loops + p.getLatencySamples() + (int) rate;
     juce::AudioBuffer<float> out (2, total), block (2, 512);
     for (int pos = 0; pos < total; pos += 512)
     {
         const int loop = juce::jmin (loops - 1, pos / loopLen);
         const float within = (float) (pos - loop * loopLen) / (float) loopLen;
         const float stations[] = { 0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f };
-        set ("spread", loop < 4 ? stations[loop] : (loop == 4 ? within : 2.0f / 3.0f));
-        set ("encodeCount", loop == 5 ? 1.0f : 0.0f);
+        set ("spread", loop < 4 ? stations[loop] : loop == 4 ? within : loop == 5 ? 0.0f : 2.0f / 3.0f);
+        set ("encodeCount", loop == 6 ? 1.0f : 0.0f);
         juce::MidiBuffer midi;
+        for (int note : { 40, 45 })   // harmony keys E1, A1: held through loop 5
+        {
+            if (5 * loopLen >= pos && 5 * loopLen < pos + 512) midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+            if (6 * loopLen >= pos && 6 * loopLen < pos + 512) midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+        }
         for (int l = 0; l < loops; ++l)
             if (l * loopLen >= pos && l * loopLen < pos + 512)
                 midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), l * loopLen - pos);

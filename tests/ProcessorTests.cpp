@@ -3,6 +3,7 @@
 #include "../Source/Tune.h"
 #include <cstdio>
 #include <algorithm>
+#include <set>
 
 static int failures = 0;
 
@@ -573,71 +574,106 @@ int main()
     }
 
 
-    std::printf ("spread (paths)\n");
+    std::printf ("harmony (paths)\n");
     {
-        auto b = fakeBank ({ 100, 200, 300, 400, 500, 600, 700 }, 3);   // primary in the middle
-        float c[maxVoices], d[maxVoices];
-        spread::compute (*b, 0.0f, 1, 0.0f, c, d);
-        CHECK (*std::max_element (c, c + 7) == 0.0f && *std::min_element (c, c + 7) == 0.0f, "Spread 0 -> unison");
-        spread::compute (*b, 1.0f / 3.0f, 1, 0.0f, c, d);
-        CHECK (c[3] == 0.0f && c[2] < 0.0f && c[4] > 0.0f && std::abs (c[2]) < 0.3f && std::abs (c[0]) > std::abs (c[2]),
-               "chorus station: small detune, opposite sides, wider further out");
-        spread::compute (*b, 2.0f / 3.0f, 1, 0.0f, c, d);   // minor triad
-        CHECK (c[4] == 3.0f && c[2] == -5.0f && c[5] == 7.0f && c[1] == -9.0f && c[6] == 12.0f && c[0] == -12.0f,
-               "chord station: minor triad tones, outer voices widest");
-        CHECK (d[6] == 0.0f && d[0] == 0.0f && d[5] == 7.0f, "dry voices fold wide tones by octaves into +-7 st");
-        spread::compute (*b, 1.0f, 1, 0.0f, c, d);
-        CHECK (c[4] == 1.0f && c[5] == 2.0f && c[6] == 3.0f && c[2] == -1.0f && c[0] == -3.0f, "cluster station: a semitone apart");
-        CHECK (c[3] == 0.0f, "primary never moves");
+        auto b = fakeBank ({ 110, 150, 196, 247, 300, 370, 440 }, 3);   // primary (247 Hz) in the middle
+        harmony::Voice v[maxVoices];
+        // The note (MIDI, fractional) a voice is aimed at.
+        auto noteOf = [&] (int s, int rootPc) { return 69.0f + 12.0f * std::log2 (harmony::rootTargetHz (rootPc, b->stems[(size_t) s]->analysis.pitchHz, v[s].semis) / 440.0f); };
+        auto selfNote = [&] (int s) { return 69.0f + 12.0f * std::log2 (b->stems[(size_t) s]->analysis.pitchHz / 440.0f); };
+        auto pc = [] (float note) { return ((juce::roundToInt (note) % 12) + 12) % 12; };
 
-        // Continuity of both paths across the whole knob, at several Snap settings.
-        float worst = 0.0f;
+        harmony::compute (*b, 0.0f, 1, 0.0f, 0, tune::root, nullptr, v);
+        bool natural = true; for (int s = 0; s < 7; ++s) natural &= v[s].pull == 0.0f && v[s].strength == 0.0f;
+        CHECK (natural, "Spread 0 -> natural speech, nothing pulled");
+
+        harmony::compute (*b, 1.0f / 3.0f, 1, 0.0f, 0, tune::root, nullptr, v);
+        bool onRoot = true, close = true;
+        for (int s = 0; s < 7; ++s) if (s != 3) { onRoot &= pc (noteOf (s, 0)) == 0 && v[s].pull == 1.0f; close &= std::abs (noteOf (s, 0) - selfNote (s)) <= 6.01f; }
+        CHECK (onRoot, "chorus station: every crowd voice sings the root");
+        CHECK (close, "each in the octave nearest its own voice (no shift past 6 st)");
+        CHECK (v[2].detune * v[4].detune < 0.0f && std::abs (v[0].detune) > std::abs (v[2].detune) && v[2].drift == 1.0f,
+               "chorus: detuned to opposite sides, wider further out, drifting");
+        CHECK (v[3].pull == 0.0f && v[3].strength == 0.0f, "the primary stays human");
+
+        harmony::compute (*b, 2.0f / 3.0f, 1, 0.0f, 0, tune::root, nullptr, v);   // minor triad on C
+        bool triad = true; std::set<int> used;
+        for (int s = 0; s < 7; ++s) if (s != 3) { const int c = pc (noteOf (s, 0)); triad &= c == 0 || c == 3 || c == 7; used.insert (c); close &= std::abs (noteOf (s, 0) - selfNote (s)) <= 6.01f; }
+        CHECK (triad && used.size() == 3, "chord station: the crowd sings C, Eb and G");
+        CHECK (close, "chord tones voiced near each voice's register");
+
+        harmony::compute (*b, 2.0f / 3.0f, 1, 0.0f, 7, tune::root, nullptr, v);   // root G
+        triad = true; for (int s = 0; s < 7; ++s) if (s != 3) { const int c = pc (noteOf (s, 7)); triad &= c == 7 || c == 10 || c == 2; }
+        CHECK (triad, "the chord follows the Tune root (G minor: G Bb D)");
+
+        bool held[12] {}; held[4] = held[7] = held[11] = true;   // E G B on the harmony keys
+        harmony::compute (*b, 0.0f, 1, 0.0f, 0, tune::root, held, v);
+        bool keys = true; for (int s = 0; s < 7; ++s) if (s != 3) { const int c = pc (noteOf (s, 0)); keys &= (c == 4 || c == 7 || c == 11) && v[s].pull == 1.0f; }
+        CHECK (keys, "held harmony keys override the chord, even with Spread at 0");
+        CHECK (pc (noteOf (0, 0)) == 4 && pc (noteOf (6, 0)) == 11, "held notes spread low-to-high across the crowd");
+
+        harmony::compute (*b, 1.0f, 1, 0.0f, 9, tune::minor, nullptr, v);   // A minor cluster
+        bool inScale = true; for (int s = 0; s < 7; ++s) if (s != 3) { const int c = pc (noteOf (s, 9)); inScale &= c == 9 || c == 11 || c == 0 || c == 2 || c == 4 || c == 5 || c == 7; }
+        CHECK (inScale, "cluster station: neighbouring steps of the Tune scale");
+
+        // Continuity across the whole knob at several Snap settings: target note and pull glide.
+        float worst = 0.0f, worstPull = 0.0f;
         for (float snap : { 0.0f, 0.5f, 1.0f })
         {
-            float pc[maxVoices], pd[maxVoices];
-            spread::compute (*b, 0.0f, 1, snap, pc, pd);
+            harmony::Voice pv[maxVoices];
+            harmony::compute (*b, 0.0f, 1, snap, 0, tune::major, nullptr, pv);
             for (int k = 1; k <= 3000; ++k)
             {
-                spread::compute (*b, (float) k / 3000.0f, 1, snap, c, d);
-                for (int i = 0; i < 7; ++i) worst = juce::jmax (worst, std::abs (c[i] - pc[i]), std::abs (d[i] - pd[i]));
-                std::copy (c, c + 7, pc); std::copy (d, d + 7, pd);
+                harmony::compute (*b, (float) k / 3000.0f, 1, snap, 0, tune::major, nullptr, v);
+                for (int i = 0; i < 7; ++i) { worst = juce::jmax (worst, std::abs (v[i].semis - pv[i].semis)); worstPull = juce::jmax (worstPull, std::abs (v[i].pull - pv[i].pull)); }
+                std::copy (v, v + 7, pv);
             }
         }
-        std::printf ("       largest step between adjacent knob positions: %.3f st\n", worst);
-        CHECK (worst < 0.25f, "every voice glides, nothing steps (even at full Snap)");
+        std::printf ("       largest step between adjacent knob positions: %.3f st, pull %.3f\n", worst, worstPull);
+        CHECK (worst < 0.25f && worstPull < 0.05f, "every voice glides between stations, nothing steps");
 
-        // Snap: lingers near stations.
-        spread::compute (*b, 2.0f / 3.0f - 0.08f, 1, 1.0f, c, d);
-        const float nearChordSnap = c[6];
-        spread::compute (*b, 2.0f / 3.0f - 0.08f, 1, 0.0f, c, d);
-        CHECK (std::abs (nearChordSnap - 12.0f) < std::abs (c[6] - 12.0f) * 0.3f, "full Snap lingers on the chord tone");
+        // The pitch map: steady voices land on the note, wobble is ironed out by strength.
+        harmony::PitchMap m; m.centre = 200.0f; m.targetHz = 261.63f; m.pull = 1.0f; m.strength = 1.0f;
+        CHECK (std::abs (200.0f * harmony::ratio (200.0f, m) - 261.63f) < 0.1f && std::abs (210.0f * harmony::ratio (210.0f, m) - 261.63f) < 0.1f,
+               "full strength: every period on the target");
+        m.strength = 0.0f;
+        CHECK (std::abs (200.0f * harmony::ratio (200.0f, m) - 261.63f) < 0.1f && 210.0f * harmony::ratio (210.0f, m) > 270.0f,
+               "zero strength: the median moves, the wobble stays");
+        m.pull = 0.0f; m.tune.amount = 0.0f;
+        CHECK (harmony::ratio (210.0f, m) == 1.0f, "no pull, no Tune: untouched");
+        float d0 = 0, d1 = 0; for (int i = 0; i < 4800; ++i) { const float c = harmony::driftCents (2, i / 100.0, 1.0f); d0 = juce::jmin (d0, c); d1 = juce::jmax (d1, c); }
+        CHECK (d1 - d0 > 20.0f && d1 - d0 < 60.0f && harmony::driftCents (2, 3.0, 0.0f) == 0.0f, "Drift wanders a few tens of cents, and Drift 0 is still");
     }
 
-    std::printf ("spread (audio)\n");
+    std::printf ("harmony (audio)\n");
     {
         // Syllabic harmonic tones, so PSOLA has real pitch periods and gaps to keep in time.
-        auto syllabic = [&] (float f0)
+        auto syllabic = [&] (float f0, float vib)
         {
             const int len = (int) (rate * 2.0);
-            auto t = voiceTone (f0, 0.4f, rate, len);
+            juce::AudioBuffer<float> t (1, len);
+            double ph = 0;
             for (int i = 0; i < len; ++i)
             {
-                const double tt = i / rate, ph = std::fmod (tt, 0.4);
-                t.setSample (0, i, t.getSample (0, i) * (tt > 0.1 && ph < 0.28 ? (float) std::sin (juce::MathConstants<double>::pi * ph / 0.28) : 0.0f));
+                const double tt = i / rate, sp = std::fmod (tt, 0.4);
+                const double f = f0 * (1.0 + vib * std::sin (juce::MathConstants<double>::twoPi * 5.0 * tt));
+                ph += f / rate;
+                double v = 0; for (int h = 1; h <= 12; ++h) v += std::sin (juce::MathConstants<double>::twoPi * h * ph) / h;
+                t.setSample (0, i, (float) (0.25 * v * (tt > 0.1 && sp < 0.28 ? std::sin (juce::MathConstants<double>::pi * sp / 0.28) : 0.0)));
             }
             return t;
         };
-        auto fPrim = writeWav ("sp_prim.wav", syllabic (150.0f), rate);
-        auto fUp = writeWav ("sp_up.wav", syllabic (200.0f), rate);
+        auto fPrim = writeWav ("sp_prim.wav", syllabic (150.0f, 0.0f), rate);
+        auto fUp = writeWav ("sp_up.wav", syllabic (200.0f, 0.0f), rate);
         DrosakaVoiceProcessor p; p.prepareToPlay (rate, 256);
         juce::StringArray errs; p.addStems ({ fPrim.getFullPathName(), fUp.getFullPathName() }, errs);
         auto set = [&] (const char* id, float v) { auto* prm = p.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
-        set ("snap", 0.0f);
+        set ("snap", 0.0f); set ("drift", 0.0f);
         p.setSolo (1, true);
 
-        auto render = [&] (float spreadKnob, int chord)
+        auto render = [&] (float spreadKnob, int chord, int rootPc)
         {
-            set ("spread", spreadKnob); set ("chord", (float) chord);
+            set ("spread", spreadKnob); set ("chord", (float) chord); set ("tuneRoot", (float) rootPc);
             run (p, 256, 500, {});   // settle and let any phrase finish
             auto out = run (p, 256, 400, { 0 });
             juce::AudioBuffer<float> mono (1, out.getNumSamples());
@@ -657,38 +693,102 @@ int main()
             }
             return best;   // ms
         };
+        // The 200 Hz voice is the upper neighbour of the primary: chord slot "up 1".
+        const float cHz = 261.63f, gHz = 196.0f;
+        auto dry = render (0.0f, 0, 0);
+        auto chorusC = render (1.0f / 3.0f, 0, 0);   // root C, nearest octave to 200 Hz: C4 (+4.6 st)
+        auto fifthG = render (2.0f / 3.0f, 0, 0);    // Fifths on C: up tone = G, nearest 200 Hz: G3
+        auto rootG = render (1.0f / 3.0f, 0, 7);     // root G: G3
+        const float pd = pitchOf (dry), pc4 = pitchOf (chorusC), pg = pitchOf (fifthG), pr = pitchOf (rootG);
+        std::printf ("       natural %.1f Hz, chorus on C %.1f (want ~%.1f), fifth G %.1f (want ~%.1f), root G %.1f\n", pd, pc4, cHz, pg, gHz, pr);
+        CHECK (std::abs (pd - 200.0f) < 2.0f, "natural: the voice as recorded");
+        CHECK (std::abs (12 * std::log2 (pc4 / cHz)) < 0.3, "chorus: the voice sings the root (within its small detune)");
+        CHECK (std::abs (12 * std::log2 (pg / gHz)) < 0.15 && std::abs (12 * std::log2 (pr / gHz)) < 0.3, "chord and root land on G");
 
-        auto dry = render (0.0f, 0);
-        auto fifth = render (2.0f / 3.0f, 0);   // Fifths: the right-hand voice goes up 7
-        auto minor = render (2.0f / 3.0f, 1);   // Minor triad: up 3
-        auto clus = render (1.0f, 0);           // cluster: up 1
-        const float pd = pitchOf (dry), pf = pitchOf (fifth), pm = pitchOf (minor), pc = pitchOf (clus);
-        std::printf ("       dry %.1f Hz, fifth %.1f (want %.1f), minor 3rd %.1f (want %.1f), cluster %.1f (want %.1f)\n",
-                     pd, pf, 200 * std::exp2 (7 / 12.0), pm, 200 * std::exp2 (3 / 12.0), pc, 200 * std::exp2 (1 / 12.0));
-        CHECK (std::abs (pf - 200 * std::exp2 (7 / 12.0)) < 4.0, "PSOLA: up a fifth lands on the fifth");
-        CHECK (std::abs (pm - 200 * std::exp2 (3 / 12.0)) < 4.0, "PSOLA: up a minor third lands on it");
-        CHECK (std::abs (pc - 200 * std::exp2 (1 / 12.0)) < 3.0, "PSOLA: cluster semitone lands on it");
-
-        const int lag = envLag (dry, fifth);
-        std::printf ("       timing shift after pitching up a fifth: %d ms\n", lag);
+        const int lag = envLag (dry, chorusC);
+        std::printf ("       timing shift on the root: %d ms\n", lag);
         CHECK (std::abs (lag) <= 5, "pitch shifting keeps the timing (syllables stay put)");
-        const double db = 20 * std::log10 (fifth.getRMSLevel (0, 0, fifth.getNumSamples()) / dry.getRMSLevel (0, 0, dry.getNumSamples()));
-        std::printf ("       level after pitching up a fifth: %+.1f dB\n", db);
+        const double db = 20 * std::log10 (chorusC.getRMSLevel (0, 0, chorusC.getNumSamples()) / dry.getRMSLevel (0, 0, dry.getNumSamples()));
+        std::printf ("       level on the root: %+.1f dB\n", db);
         CHECK (std::abs (db) < 2.5, "pitch shifting keeps the level within 2.5 dB");
 
-        // Codec: the full interval, past what PSOLA allows. Octaves set: +12 for this voice.
+        // Harmony keys: hold E1 and the voice goes to E (nearest 200 Hz: E3, 164.8 Hz).
+        set ("spread", 0.0f); run (p, 256, 500, {});
+        juce::MidiBuffer hold; hold.addEvent (juce::MidiMessage::noteOn (1, 40, (juce::uint8) 100), 0);
+        {
+            juce::AudioBuffer<float> buf (2, 256); buf.clear(); p.processBlock (buf, hold);
+        }
+        CHECK (p.isHarmonyHeld (4) && ! p.isHarmonyHeld (0), "a harmony key registers as held");
+        auto quiet = run (p, 256, 100, {});
+        CHECK (quiet.getMagnitude (0, quiet.getNumSamples()) < 1e-4f, "harmony keys don't trigger the phrase");
+        auto keyed = run (p, 256, 400, { 0 });
+        juce::AudioBuffer<float> km (1, keyed.getNumSamples());
+        for (int i = 0; i < keyed.getNumSamples(); ++i) km.setSample (0, i, keyed.getSample (0, i) + keyed.getSample (1, i));
+        const float pk = pitchOf (km);
+        std::printf ("       holding E1: %.1f Hz (want ~164.8)\n", pk);
+        CHECK (std::abs (12 * std::log2 (pk / 164.81f)) < 0.15, "the held key sets the note, at Spread 0");
+        CHECK (std::abs (p.getVoiceNote (1) - 52.0f) < 0.2f, "the row readout shows the sung note (E3)");
+        juce::MidiBuffer rel; rel.addEvent (juce::MidiMessage::noteOff (1, 40), 0);
+        { juce::AudioBuffer<float> buf (2, 256); buf.clear(); p.processBlock (buf, rel); }
+        CHECK (! p.isHarmonyHeld (4), "releasing the key lets go");
+
+        // Encoded voices sing the same note.
         set ("encodeCount", 1.0f);
-        auto oct = render (2.0f / 3.0f, 5);
-        const float po = pitchOf (oct);
-        std::printf ("       encoded voice, octave up: %.1f Hz (want ~400)\n", po);
-        CHECK (std::abs (po - 400.0f) < 10.0f, "encoded voices play the full interval (an octave, beyond the dry +-7)");
+        auto enc = render (1.0f / 3.0f, 0, 0);
+        const float pe = pitchOf (enc);
+        std::printf ("       encoded, chorus on C: %.1f Hz\n", pe);
+        CHECK (std::abs (12 * std::log2 (pe / cHz)) < 0.4, "encoded voices sing the same note as dry ones");
         set ("encodeCount", 0.0f);
 
+        // Wobble: a voice with vibrato is ironed flat at the chord station.
+        {
+            auto fVib = writeWav ("sp_vib.wav", syllabic (200.0f, 0.03f), rate);
+            DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256);
+            juce::StringArray e2; q.addStems ({ fPrim.getFullPathName(), fVib.getFullPathName() }, e2);
+            auto setq = [&] (const char* id, float v) { auto* prm = q.params.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+            setq ("snap", 0.0f); setq ("drift", 0.0f); q.setSolo (1, true);
+            auto wobble = [&] (float knob)
+            {
+                setq ("spread", knob); run (q, 256, 500, {});
+                auto o = run (q, 256, 300, { 0 });
+                // Pitch track (autocorrelation) over voiced 25 ms windows: spread in cents.
+                std::vector<float> f;
+                const int W = 1200;
+                for (int at = 4800; at + W + 600 < o.getNumSamples(); at += 480)
+                {
+                    auto x = [&] (int i) { return o.getSample (0, at + i) + o.getSample (1, at + i); };
+                    double e = 0; for (int i = 0; i < W; ++i) e += x (i) * x (i);
+                    if (e / W < 0.002) continue;
+                    int best = 0; double bv = 0;
+                    for (int lag = 120; lag <= 480; ++lag)
+                    {
+                        double acc = 0, n1 = 0, n2 = 0;
+                        for (int i = 0; i < W; ++i) { acc += x (i) * x (i + lag); n2 += x (i + lag) * x (i + lag); }
+                        n1 = e; acc /= std::sqrt (n1 * n2 + 1e-12);
+                        if (acc > bv) { bv = acc; best = lag; }
+                    }
+                    if (bv > 0.8 && best > 0)
+                    {   // parabolic refinement
+                        auto r = [&] (int lag) { double a2 = 0; for (int i = 0; i < W; ++i) a2 += x (i) * x (i + lag); return a2; };
+                        const double y0 = r (best - 1), y1 = r (best), y2 = r (best + 1);
+                        const double d = 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2);
+                        f.push_back (1200.0f * std::log2 ((float) (rate / (best + d)) / 200.0f));
+                    }
+                }
+                if (f.size() < 4) return 999.0f;
+                std::sort (f.begin(), f.end());
+                return f[f.size() * 9 / 10] - f[f.size() / 10];
+            };
+            const float wNat = wobble (0.0f), wChord = wobble (2.0f / 3.0f);
+            std::printf ("       vibrato spread: natural %.0f cents, chord station %.0f\n", wNat, wChord);
+            CHECK (wNat > 40.0f && wChord < wNat * 0.35f, "the chord station irons out the wobble");
+        }
+
         // A slow sweep of the whole knob while the phrase plays: no clicks, no level holes.
+        set ("drift", 0.35f); set ("tuneRoot", 0.0f);
         set ("spread", 0.0f);
         run (p, 256, 500, {});
         auto sweep = run (p, 256, 400, { 0 }, [&] (int blk) { set ("spread", juce::jlimit (0.0f, 1.0f, (float) blk / 380.0f)); });
-        auto stillOut = run (p, 256, 10, {});
         set ("spread", 2.0f / 3.0f); run (p, 256, 500, {});
         auto steadyShift = run (p, 256, 400, { 0 });
         set ("spread", 0.0f); run (p, 256, 500, {});
@@ -866,7 +966,7 @@ int main()
         };
         auto mag = [] (const juce::AudioBuffer<float>& o, int a, int n2) { return juce::jmax (o.getMagnitude (0, a, n2), o.getMagnitude (1, a, n2)); };
 
-        auto whole = play (40);   // not a slice key: the whole phrase
+        auto whole = play (30);   // not a slice key: the whole phrase
         auto s2 = play (61);      // C#3: region 2 = 0.5 .. 1.0 s
         const int r0 = L + (int) (0.5 * rate), r1 = L + (int) (1.0 * rate);
         CHECK (mag (whole, L + (int) (1.7 * rate), 2000) > 0.01f, "other keys play the whole phrase");

@@ -104,13 +104,15 @@ public:
         g.setFont (juce::FontOptions (13.0f));
         g.setColour (colours::wave);
         g.drawText (name, c.name.withTrimmedLeft (10).withTrimmedRight (40), juce::Justification::centredLeft, true);
-        const float semis = proc.getVoiceSemis (idx);
-        if (std::abs (semis) > 0.04f)
+        const float note = proc.getVoiceNote (idx);   // the note Spread has this voice singing
+        if (note >= 0.0f)
         {
+            const int nn = juce::roundToInt (note);
+            const int cents = juce::roundToInt ((note - (float) nn) * 100.0f);
             g.setFont (juce::FontOptions (11.0f));
             g.setColour (colours::pitch);
-            g.drawText ((semis > 0 ? "+" : "") + juce::String (semis, std::abs (semis) < 1.0f ? 2 : 1), c.name.withTrimmedRight (4),
-                        juce::Justification::centredRight);
+            g.drawText (juce::MidiMessage::getMidiNoteName (nn, true, true, 3) + (std::abs (cents) >= 3 ? (cents > 0 ? " +" : " ") + juce::String (cents) : juce::String()),
+                        c.name.withTrimmedRight (4), juce::Justification::centredRight);
         }
 
         paintLane (g, c.lane, *bank);
@@ -496,8 +498,12 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
         { "count",       "COUNT",      colours::accent, [this, voices] { return juce::String (proc.params.getRawParameterValue ("count")->load() * (float) voices(), 1) + " of " + juce::String (voices()); } },
         { "spread",      "SPREAD",     colours::pitch,  [this]
             {
+                juce::StringArray held;   // harmony keys (C1-B1) override the chord menu
+                for (int pc = 0; pc < 12; ++pc)
+                    if (proc.isHarmonyHeld (pc)) held.add (juce::MidiMessage::getMidiNoteName (pc, true, false, 3));
+                if (! held.isEmpty()) return "keys: " + held.joinIntoString (" ");
                 const float v = proc.params.getRawParameterValue ("spread")->load() * 3.0f;
-                const char* names[] = { "unison", "chorus", "chord", "cluster" };
+                const char* names[] = { "natural", "chorus", "chord", "cluster" };
                 const int near = juce::jmin (3, juce::roundToInt (v));
                 return std::abs (v - (float) near) < 0.04f ? juce::String (names[near])
                      : juce::String (names[juce::jmin (2, (int) v)]) + juce::String (juce::CharPointer_UTF8 (" \xe2\x86\x92 ")) + names[juce::jmin (3, (int) v + 1)];
@@ -559,6 +565,8 @@ DrosakaVoiceEditor::DrosakaVoiceEditor (DrosakaVoiceProcessor& p)
     // Autotune and recording.
     tuneCell = std::make_unique<KnobCell> (proc, "tuneAmount", "TUNE", colours::pitch, std::function<juce::String()> {});
     addAndMakeVisible (*tuneCell);
+    driftCell = std::make_unique<KnobCell> (proc, "drift", "DRIFT", colours::pitch, std::function<juce::String()> {});
+    addAndMakeVisible (*driftCell);
     setupBox (tuneRootBox, tune::rootNames(), "tuneRoot", tuneRootAttachment);
     setupBox (tuneScaleBox, tune::scaleNames(), "tuneScale", tuneScaleAttachment);
     styleSwitch (recordButton, juce::Colour (0xffe0303a), "record", recordAttachment);
@@ -577,6 +585,7 @@ DrosakaVoiceEditor::~DrosakaVoiceEditor()
     rows.clear();
     cells.clear();
     tuneCell.reset();
+    driftCell.reset();
 }
 
 void DrosakaVoiceEditor::addFiles (const juce::StringArray& paths)
@@ -649,6 +658,7 @@ void DrosakaVoiceEditor::timerCallback()
     for (auto& c : cells) c->repaint();   // values that follow the music (Encode of N audible...) and CC badges
     sliceView->repaint();                 // markers can be moved by automation
     if (tuneCell != nullptr) tuneCell->repaint();
+    if (driftCell != nullptr) driftCell->repaint();
     if (auto msg = proc.getRecordMessage(); msg != lastRecordMessage) { lastRecordMessage = msg; status = msg; repaint(); }
     repaint (panelArea());
 }
@@ -708,9 +718,10 @@ void DrosakaVoiceEditor::resized()
     latchButton.setBounds (p.getX() + 2 * (w3 + 8), p.getY() + 70, w3, 34);
     keepHumanButton.setButtonText ("KEEP HUMAN");
 
-    tuneCell->setBounds (p.getX() - 2, p.getY() + 110, 100, 84);
-    tuneRootBox.setBounds (p.getX() + 104, p.getY() + 134, 64, 26);
-    tuneScaleBox.setBounds (p.getX() + 174, p.getY() + 134, 78, 26);
+    tuneCell->setBounds (p.getX() - 2, p.getY() + 110, 92, 84);
+    driftCell->setBounds (p.getX() + 90, p.getY() + 110, 92, 84);
+    tuneRootBox.setBounds (p.getX() + 186, p.getY() + 124, 66, 24);
+    tuneScaleBox.setBounds (p.getX() + 186, p.getY() + 168, 66, 24);
     recordButton.setBounds (p.getRight() - 84, p.getY() + 124, 84, 34);
 
     listView.setBounds (16, g.getBottom() + 34, getWidth() - 32, getHeight() - g.getBottom() - 34 - 30);
@@ -788,7 +799,7 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
             const int ins = proc.inputChannels.load();
             g.drawText (rec ? juce::String (proc.recordSeconds.load(), 1) + " s"
                             : ins == 0 ? juce::String ("no input")
-                                       : lvl > 1e-4f ? juce::String ("input ") + juce::String (juce::Decibels::gainToDecibels (lvl), 0) + " dB"
+                                       : lvl > 1e-4f ? juce::String ("input ") + juce::String (juce::roundToInt (juce::Decibels::gainToDecibels (lvl))) + " dB"
                                                      : juce::String ("input silent"),
                         meter.getX(), meter.getBottom() + 3, meter.getWidth() + 30, 14, juce::Justification::centredLeft);
         }
@@ -852,8 +863,8 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.setColour (colours::dim);
         const int regions = proc.getSlices().numRegions();
         g.drawText (regions > 0 ? "C3 to " + juce::MidiMessage::getMidiNoteName (Bank::sliceRoot + regions - 1, true, true, 3)
-                                    + " play the slices across every voice; any other key plays the whole phrase"
-                                : juce::String ("any MIDI note plays the whole bank in sync; double-click the waveform to slice"),
+                                    + " play the slices across every voice; any other key plays the whole phrase; hold C1-B1 to set the harmony"
+                                : juce::String ("any note plays the whole bank in sync (C1-B1 set the harmony); double-click the waveform to slice"),
                     footer, juce::Justification::centredLeft);
     }
 }
