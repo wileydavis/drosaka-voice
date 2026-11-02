@@ -65,6 +65,7 @@ public:
     void setMute (int stemIndex, bool);
     void setSolo (int stemIndex, bool);
     void setStemGain (int stemIndex, float dB);   // level trim per stem, -24..+12 dB
+    void setStemDirect (int stemIndex, bool);     // stem plays on its own output instead of the main mix
     void setSortAxis (SortAxis);
 
     // Alignment (all message thread).
@@ -300,6 +301,7 @@ private:
     std::atomic<int> ccToParam[128];
     std::atomic<int> learnParam { -1 };
     std::atomic<float> pendingCc[128];        // latest value per CC, -1 = nothing new
+    static BusesProperties makeBuses();
     void timerCallback() override { applyPendingMidi(); processFinishedTake(); flushBankRecall(); }
 
     // Banks (see numBanks). slots[k] holds bank k's material while it isn't playing; the

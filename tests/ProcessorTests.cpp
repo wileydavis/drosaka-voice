@@ -1922,6 +1922,60 @@ int main()
         CHECK (std::abs (q.getBank()->flags[1].gainDb + 4.5f) < 1e-4f && q.getBank()->flags[0].gainDb == 0.0f, "each bank keeps its own trims");
     }
 
+    std::printf ("stem outputs\n");
+    {
+        auto fA = writeWav ("so_a.wav", voiceTone (140.0f, 0.4f, rate, (int) (rate * 1.5)), rate);
+        auto fB = writeWav ("so_b.wav", voiceTone (200.0f, 0.4f, rate, (int) (rate * 1.5)), rate);
+        DrosakaVoiceProcessor p;
+        CHECK (p.getBusCount (false) == 1 + numStemOuts && p.getBus (false, 2)->getName() == "Stem 2" && p.getTotalNumOutputChannels() == 2 + 2 * numStemOuts,
+               "a main stereo out plus 16 stereo stem outputs");
+        p.prepareToPlay (rate, 256);
+        juce::StringArray errs; p.addStems ({ fA.getFullPathName(), fB.getFullPathName() }, errs);
+        setCount (p, 1.0f);
+        const int chans = p.getTotalNumOutputChannels();
+        auto render = [&]
+        {
+            juce::AudioBuffer<float> blk (chans, 256), out (chans, 256 * 200);
+            for (int k = 0; k < 400; ++k) { juce::MidiBuffer m; blk.clear(); p.processBlock (blk, m); }
+            for (int k = 0; k < 200; ++k)
+            {
+                juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+                blk.clear(); p.processBlock (blk, m);
+                for (int ch = 0; ch < chans; ++ch) out.copyFrom (ch, k * 256, blk, ch, 0, 256);
+            }
+            return out;
+        };
+        auto rms = [] (const juce::AudioBuffer<float>& o, int ch) { return o.getRMSLevel (ch, 4800, 40000); };
+        auto pitchOn = [&] (const juce::AudioBuffer<float>& o, int ch)
+        {
+            juce::AudioBuffer<float> m (1, 40000);
+            for (int i = 0; i < 40000; ++i) m.setSample (0, i, o.getSample (ch, 4800 + i) + o.getSample (ch + 1, 4800 + i));
+            return analyseStem (m.getReadPointer (0), 40000, rate).pitchHz;
+        };
+        auto both = render();
+        const float mainBoth = rms (both, 0) + rms (both, 1);
+        CHECK (rms (both, 4) + rms (both, 5) < 1e-6f, "off by default: every stem in the main mix, stem outputs silent");
+        p.setStemDirect (1, true);
+        auto split = render();
+        const float main = rms (split, 0) + rms (split, 1), own = rms (split, 4) + rms (split, 5);
+        const float mainPitch = pitchOn (split, 0), ownPitch = pitchOn (split, 4);
+        std::printf ("       main %.3f (was %.3f), Stem 2 out %.3f; main pitch %.0f Hz, Stem 2 pitch %.0f Hz\n", main, mainBoth, own, mainPitch, ownPitch);
+        CHECK (own > 0.02f && std::abs (ownPitch - 200.0f) < 3.0f, "a stem switched to its own output plays there");
+        CHECK (std::abs (mainPitch - 140.0f) < 3.0f && main < mainBoth, "and leaves the main mix");
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256); q.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (q.getBank()->flags[1].direct && ! q.getBank()->flags[0].direct, "the routing saves with the set");
+        // A host that only gives us the main pair: a direct stem falls back into the mix rather than going silent.
+        juce::AudioBuffer<float> two (2, 256);
+        float peak = 0.0f;
+        for (int k = 0; k < 300; ++k)
+        {
+            juce::MidiBuffer m; if (k == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            q.processBlock (two, m); peak = juce::jmax (peak, two.getMagnitude (0, 0, 256));
+        }
+        CHECK (peak > 0.05f, "with no stem outputs available, nothing goes missing");
+    }
+
     std::printf ("milestone 1 sets still open\n");
     {
         juce::ValueTree old ("DrosakaVoice");

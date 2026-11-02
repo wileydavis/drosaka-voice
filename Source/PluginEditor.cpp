@@ -35,7 +35,7 @@ namespace
 
 //==============================================================================
 // One stem in the sorted list:
-//   [level + name] [alignment lane: drag to nudge] [gain trim] [codec order] [pitch formant] [P M S x]
+//   [level + name] [alignment lane: drag to nudge] [gain trim] [codec order] [pitch formant] [out P M S x]
 class VoiceRow : public juce::Component
 {
 public:
@@ -44,7 +44,7 @@ public:
     static Cols columns (juce::Rectangle<int> r)
     {
         Cols c;
-        c.buttons = r.removeFromRight (4 * 26 + 4);
+        c.buttons = r.removeFromRight (5 * 26 + 4);
         c.info = r.removeFromRight (150);
         c.order = r.removeFromRight (34);
         c.gain = r.removeFromRight (58);
@@ -62,7 +62,15 @@ public:
         info = formatHz (s.analysis.pitchHz) + "   " + formatHz (s.analysis.centroidHz);
         isPrimary = b.primary == idx;
 
-        for (auto* btn : { &primaryBtn, &muteBtn, &soloBtn, &removeBtn }) { addAndMakeVisible (*btn); styleToggle (*btn, colours::accent); }
+        for (auto* btn : { &outBtn, &primaryBtn, &muteBtn, &soloBtn, &removeBtn }) { addAndMakeVisible (*btn); styleToggle (*btn, colours::accent); }
+        styleToggle (outBtn, colours::wave);
+        outBtn.setButtonText (juce::String (idx + 1));
+        outBtn.setToggleState (b.flags[(size_t) idx].direct, juce::dontSendNotification);
+        outBtn.setEnabled (idx < numStemOuts);
+        outBtn.setTooltip (idx < numStemOuts ? "Own output: this stem plays on drosaka Voice's \"Stem " + juce::String (idx + 1)
+                                                   + "\" output instead of the main mix. In Live, set an audio track's Audio From to it"
+                                             : "Only the first " + juce::String (numStemOuts) + " stems can have their own output");
+        outBtn.onClick = [this] { proc.setStemDirect (idx, ! outBtn.getToggleState()); };
         styleToggle (muteBtn, colours::dim);
         styleToggle (soloBtn, juce::Colour (0xffe8c547));
         primaryBtn.setToggleState (isPrimary, juce::dontSendNotification);
@@ -86,7 +94,8 @@ public:
         removeBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22)); r.removeFromRight (4);
         soloBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));   r.removeFromRight (2);
         muteBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));   r.removeFromRight (2);
-        primaryBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));
+        primaryBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22)); r.removeFromRight (4);
+        outBtn.setBounds (r.removeFromRight (22).withSizeKeepingCentre (22, 22));
     }
 
     void paint (juce::Graphics& g) override
@@ -249,7 +258,7 @@ private:
     double dragStartOffset = 0.0;
     bool gainDragging = false;
     float dragStartGain = 0.0f;
-    juce::TextButton primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
+    juce::TextButton outBtn, primaryBtn { "P" }, muteBtn { "M" }, soloBtn { "S" }, removeBtn { "x" };
 };
 
 //==============================================================================
@@ -948,6 +957,7 @@ void DrosakaVoiceEditor::paint (juce::Graphics& g)
         g.drawText ("pitch       formant", cols.info.withTrimmedRight (8), juce::Justification::centredRight);
         g.drawText ("codec", cols.order, juce::Justification::centred);
         g.drawText ("gain", cols.gain, juce::Justification::centred);
+        g.drawText ("out", cols.buttons.getX() + 4, cols.buttons.getY(), 34, cols.buttons.getHeight(), juce::Justification::centred);
         g.drawText ("alignment to primary  (drag, shift = fine, double-click = reset)", cols.lane, juce::Justification::centredLeft);
     }
 

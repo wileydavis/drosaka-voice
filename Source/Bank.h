@@ -8,6 +8,7 @@
 #include "Align.h"
 
 constexpr int maxVoices = 32;   // spec designs for up to 20
+constexpr int numStemOuts = 16; // extra stereo outputs "Stem 1".."Stem 16": stem k can play on output k
 
 enum class SortAxis { pitch = 0, formant = 1 };
 
@@ -110,6 +111,7 @@ struct VoiceFlags
     double autoOffsetSec = 0.0;   // what auto-align found (double-click resets to it)
     AlignState align = AlignState::reference;
     float gainDb = 0.0f;          // level trim, -24..+12 dB, to even out the stems
+    bool direct = false;          // play on its own output ("Stem N") instead of the main mix
 };
 
 //==============================================================================

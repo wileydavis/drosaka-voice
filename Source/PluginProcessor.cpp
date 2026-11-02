@@ -26,11 +26,21 @@ namespace
     }
 }
 
+// Main stereo out (the mix), then one stereo out per stem slot for stems sent to their own
+// track ("Stem 1".."Stem 16"); a sidechain input for recording.
+juce::AudioProcessor::BusesProperties DrosakaVoiceProcessor::makeBuses()
+{
+    auto b = BusesProperties()
+                 .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                 .withInput ("Input", juce::AudioChannelSet::stereo(), false)          // unused: this is an instrument
+                 .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true);     // recording input
+    for (int k = 0; k < numStemOuts; ++k)
+        b = b.withOutput ("Stem " + juce::String (k + 1), juce::AudioChannelSet::stereo(), true);
+    return b;
+}
+
 DrosakaVoiceProcessor::DrosakaVoiceProcessor()
-    : AudioProcessor (BusesProperties()
-                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                          .withInput ("Input", juce::AudioChannelSet::stereo(), false)          // unused: this is an instrument
-                          .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true)),    // recording input
+    : AudioProcessor (makeBuses()),
       params (*this, nullptr, "PARAMS", createLayout())
 {
     formatManager.registerBasicFormats();
@@ -194,6 +204,8 @@ bool DrosakaVoiceProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
     // Stereo out. Any input layout a host asks for is fine (disabled, mono or stereo, main or
     // sidechain): inputs are only ever recorded, never heard, so we take audio wherever it arrives.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+    for (int k = 1; k < layouts.outputBuses.size(); ++k)   // stem outputs: stereo, or switched off by the host
+        if (! (layouts.outputBuses[k].isDisabled() || layouts.outputBuses[k] == juce::AudioChannelSet::stereo())) return false;
     for (const auto& in : layouts.inputBuses)
         if (! (in.isDisabled() || in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo())) return false;
     return true;
@@ -395,6 +407,14 @@ void DrosakaVoiceProcessor::setStemGain (int idx, float dB)
     auto b = getBank()->clone();
     if (idx < 0 || idx >= b->size()) return;
     b->flags[(size_t) idx].gainDb = juce::jlimit (-24.0f, 12.0f, dB);
+    swapBank (b, false);
+}
+
+void DrosakaVoiceProcessor::setStemDirect (int idx, bool on)
+{
+    auto b = getBank()->clone();
+    if (idx < 0 || idx >= b->size()) return;
+    b->flags[(size_t) idx].direct = on && idx < numStemOuts;
     swapBank (b, false);
 }
 
@@ -1177,6 +1197,14 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
 
     auto* outL = buffer.getWritePointer (0);
     auto* outR = buffer.getWritePointer (1);
+    // Stem outputs the host has switched on (channel pairs after the main out).
+    float* stemL[maxVoices] {}; float* stemR[maxVoices] {};
+    for (int k = 0; k < juce::jmin (n, numStemOuts); ++k)
+        if (auto* bus = getBus (false, k + 1); bus != nullptr && bus->isEnabled())
+        {
+            const int ch = getChannelIndexInProcessBlockBuffer (false, k + 1, 0);
+            if (ch >= 0 && ch + 1 < buffer.getNumChannels()) { stemL[k] = buffer.getWritePointer (ch); stemR[k] = buffer.getWritePointer (ch + 1); }
+        }
     auto midiIt = midi.cbegin();
 
     int nextSplit = 0;
@@ -1355,6 +1383,11 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
             const float d1 = vd.depth;
             const int dmask = (int) vd.depthRing.size() - 1;
             const float maxPre = (float) (0.012 * hostRate);   // up to 12 ms later
+            // A stem sent to its own output plays there (with its pan and depth level, but none of
+            // the shared reverb) and not in the main mix.
+            const bool direct = b.flags[(size_t) s].direct && stemL[s] != nullptr;
+            float* dstL = direct ? stemL[s] : outL;
+            float* dstR = direct ? stemR[s] : outR;
 
             for (int j = 0; j < num; ++j)
             {
@@ -1385,7 +1418,7 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
                     const float x0 = vd.depthRing[(size_t) ((vd.depthPos - pi) & dmask)];
                     const float x1 = vd.depthRing[(size_t) ((vd.depthPos - pi - 1) & dmask)];
                     const float xd = x0 + pf * (x1 - x0);
-                    const float send = xd * d * 0.22f;
+                    const float send = direct ? 0.0f : xd * d * 0.22f;
                     sendL[j] += send * (l0 + a * (l1 - l0));
                     sendR[j] += send * (r0 + a * (r1 - r0));
                     x = xd * (1.0f - 0.5f * d);    // up to -6 dB dry
@@ -1393,8 +1426,8 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
                 vd.depthPos = (vd.depthPos + 1) & dmask;
                 if (silent) continue;
 
-                outL[chunkStart + j] += x * (l0 + a * (l1 - l0));
-                outR[chunkStart + j] += x * (r0 + a * (r1 - r0));
+                dstL[chunkStart + j] += x * (l0 + a * (l1 - l0));
+                dstR[chunkStart + j] += x * (r0 + a * (r1 - r0));
             }
         }
 
@@ -1450,6 +1483,7 @@ void DrosakaVoiceProcessor::getStateInformation (juce::MemoryBlock& dest)
             v.setProperty ("autoOffset", f.autoOffsetSec, nullptr);
             v.setProperty ("align", (int) f.align, nullptr);
             if (f.gainDb != 0.0f) v.setProperty ("gainDb", f.gainDb, nullptr);
+            if (f.direct) v.setProperty ("direct", true, nullptr);
             if (st.flac.getSize() > 0) v.setProperty ("flac", juce::var (st.flac), nullptr);
             bankTree.appendChild (v, nullptr);
         }
@@ -1599,6 +1633,7 @@ void DrosakaVoiceProcessor::setStateInformation (const void* data, int size)
             fl.autoOffsetSec = (double) v.getProperty ("autoOffset", 0.0);
             fl.align = (AlignState) juce::jlimit (0, 3, (int) v.getProperty ("align", 0));
             fl.gainDb = juce::jlimit (-24.0f, 12.0f, (float) v.getProperty ("gainDb", 0.0f));
+            fl.direct = (bool) v.getProperty ("direct", false) && (int) into.stems.size() <= numStemOuts;
             into.flags.push_back (fl);
         }
         // Sets from before markers were parameters: seconds in the bank tree.
