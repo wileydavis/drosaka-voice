@@ -1954,14 +1954,28 @@ int main()
         };
         auto both = render();
         const float mainBoth = rms (both, 0) + rms (both, 1);
-        CHECK (rms (both, 4) + rms (both, 5) < 1e-6f, "off by default: every stem in the main mix, stem outputs silent");
+        const float sendPitch = pitchOn (both, 4), sendLevel = rms (both, 4) + rms (both, 5);
+        std::printf ("       by default: main %.3f, Stem 2 out %.3f at %.0f Hz\n", mainBoth, sendLevel, sendPitch);
+        CHECK (sendLevel > 0.02f && std::abs (sendPitch - 200.0f) < 3.0f && rms (both, 2) + rms (both, 3) > 0.02f,
+               "every stem is copied to its own output, as heard");
+        {
+            // The main mix still has both voices: it equals the sum of the stem outputs.
+            double diff = 0, ref = 0;
+            for (int i = 4800; i < 44800; ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    const float sum = both.getSample (2 + ch, i) + both.getSample (4 + ch, i);
+                    diff += (both.getSample (ch, i) - sum) * (both.getSample (ch, i) - sum); ref += sum * sum;
+                }
+            CHECK (diff < ref * 1e-6, "and stays in the main mix (main = the sum of the stem outputs)");
+        }
         p.setStemDirect (1, true);
         auto split = render();
         const float main = rms (split, 0) + rms (split, 1), own = rms (split, 4) + rms (split, 5);
         const float mainPitch = pitchOn (split, 0), ownPitch = pitchOn (split, 4);
         std::printf ("       main %.3f (was %.3f), Stem 2 out %.3f; main pitch %.0f Hz, Stem 2 pitch %.0f Hz\n", main, mainBoth, own, mainPitch, ownPitch);
-        CHECK (own > 0.02f && std::abs (ownPitch - 200.0f) < 3.0f, "a stem switched to its own output plays there");
-        CHECK (std::abs (mainPitch - 140.0f) < 3.0f && main < mainBoth, "and leaves the main mix");
+        CHECK (own > 0.02f && std::abs (ownPitch - 200.0f) < 3.0f && std::abs (mainPitch - 140.0f) < 3.0f && main < mainBoth,
+               "lit: the stem plays only on its own output, out of the main mix");
         juce::MemoryBlock mb; p.getStateInformation (mb);
         DrosakaVoiceProcessor q; q.prepareToPlay (rate, 256); q.setStateInformation (mb.getData(), (int) mb.getSize());
         CHECK (q.getBank()->flags[1].direct && ! q.getBank()->flags[0].direct, "the routing saves with the set");

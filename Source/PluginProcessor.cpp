@@ -1383,11 +1383,11 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
             const float d1 = vd.depth;
             const int dmask = (int) vd.depthRing.size() - 1;
             const float maxPre = (float) (0.012 * hostRate);   // up to 12 ms later
-            // A stem sent to its own output plays there (with its pan and depth level, but none of
-            // the shared reverb) and not in the main mix.
-            const bool direct = b.flags[(size_t) s].direct && stemL[s] != nullptr;
-            float* dstL = direct ? stemL[s] : outL;
-            float* dstR = direct ? stemR[s] : outR;
+            // Every stem is also copied to its own output (Stem N), as heard in the mix: a send
+            // for an effects track. 'direct' takes it out of the main mix (and the shared reverb).
+            float* ownL = stemL[s];
+            float* ownR = stemR[s];
+            const bool direct = b.flags[(size_t) s].direct && ownL != nullptr;
 
             for (int j = 0; j < num; ++j)
             {
@@ -1426,8 +1426,9 @@ void DrosakaVoiceProcessor::renderSegment (juce::AudioBuffer<float>& buffer, juc
                 vd.depthPos = (vd.depthPos + 1) & dmask;
                 if (silent) continue;
 
-                dstL[chunkStart + j] += x * (l0 + a * (l1 - l0));
-                dstR[chunkStart + j] += x * (r0 + a * (r1 - r0));
+                const float yl = x * (l0 + a * (l1 - l0)), yr = x * (r0 + a * (r1 - r0));
+                if (ownL != nullptr) { ownL[chunkStart + j] += yl; ownR[chunkStart + j] += yr; }
+                if (! direct) { outL[chunkStart + j] += yl; outR[chunkStart + j] += yr; }
             }
         }
 

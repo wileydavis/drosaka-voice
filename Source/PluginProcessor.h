@@ -65,7 +65,7 @@ public:
     void setMute (int stemIndex, bool);
     void setSolo (int stemIndex, bool);
     void setStemGain (int stemIndex, float dB);   // level trim per stem, -24..+12 dB
-    void setStemDirect (int stemIndex, bool);     // stem plays on its own output instead of the main mix
+    void setStemDirect (int stemIndex, bool);     // stem plays only on its own output, not in the main mix
     void setSortAxis (SortAxis);
 
     // Alignment (all message thread).

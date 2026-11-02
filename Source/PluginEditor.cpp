@@ -67,9 +67,9 @@ public:
         outBtn.setButtonText (juce::String (idx + 1));
         outBtn.setToggleState (b.flags[(size_t) idx].direct, juce::dontSendNotification);
         outBtn.setEnabled (idx < numStemOuts);
-        outBtn.setTooltip (idx < numStemOuts ? "Own output: this stem plays on drosaka Voice's \"Stem " + juce::String (idx + 1)
-                                                   + "\" output instead of the main mix. In Live, set an audio track's Audio From to it"
-                                             : "Only the first " + juce::String (numStemOuts) + " stems can have their own output");
+        outBtn.setTooltip (idx < numStemOuts ? "This stem is always copied to drosaka Voice's \"Stem " + juce::String (idx + 1)
+                                                   + "\" output (for an effects track). Lit: ONLY there, taken out of the main mix"
+                                             : "Only the first " + juce::String (numStemOuts) + " stems have their own output");
         outBtn.onClick = [this] { proc.setStemDirect (idx, ! outBtn.getToggleState()); };
         styleToggle (muteBtn, colours::dim);
         styleToggle (soloBtn, juce::Colour (0xffe8c547));

@@ -111,7 +111,7 @@ struct VoiceFlags
     double autoOffsetSec = 0.0;   // what auto-align found (double-click resets to it)
     AlignState align = AlignState::reference;
     float gainDb = 0.0f;          // level trim, -24..+12 dB, to even out the stems
-    bool direct = false;          // play on its own output ("Stem N") instead of the main mix
+    bool direct = false;          // only on its own output ("Stem N"), not in the main mix
 };
 
 //==============================================================================

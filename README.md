@@ -39,11 +39,12 @@ cmake -B build -DDV_BUILD_TESTS=ON && cmake --build build --target DrosakaVoiceT
 
 **Stem gain:** each row has a **gain** cell to even out stems recorded at different levels: drag it up or down (Shift for fine), double-click for 0 dB. Range −24 to +12 dB. It saves with the set, and each bank keeps its own.
 
-**Stem outputs** (to put effects on one voice): click a row's **out** button (it shows the stem's number, N). That stem now plays on the plugin's **Stem N** output instead of the main mix. In Live, make an audio track, set *Audio From* to the drosaka Voice track and choose **Stem N** underneath, and set *Monitor* to **In**. Put your effects on that track.
-- The stem keeps everything the plugin does to it (gain trim, Count, codec, pan), except the shared Depth reverb
-- N is the stem's number in the bank (the order you added stems). Removing a stem renumbers the ones after it, so check your routing after removing one
-- Each bank keeps its own routing; output N carries stem N of whichever bank is playing
-- Up to 16 stems can have their own output
+**Stem outputs** (effects on one voice): every stem is also copied to its own output, **Stem N**, where N is the number on the row's **out** button. The copy is the stem as you hear it in the mix: gain trim, Count, codec and pan, but not the shared Depth reverb. The stem keeps playing in drosaka Voice's main mix too, so an effects track on Stem N at 100% wet works like a send.
+- In Live: make an audio track, set *Audio From* to the drosaka Voice track, and in the second menu (under Pre FX / Post FX / Post Mixer) choose **Stem N**. Set *Monitor* to **In**
+- Stem outputs come straight from the plugin, so the drosaka track's own effects and fader don't touch them
+- **Lit out button:** the stem plays **only** on its own output and leaves the main mix, for when you want to process it fully on its own track
+- N is the stem's number in the bank (the order you added stems). Removing a stem renumbers the ones after it
+- Output N carries stem N of whichever bank is playing; up to 16 stems have outputs
 
 **Banks** (1–4 in the header, or the **Bank** parameter). One instance holds four phrases. Each bank has its own stems, markers and settings: every knob, menu and switch except BANK, REC and DROP, so Play mode, Latch, Scheme, Tune root and the rest are per bank.
 - **Switching** lands on the next bar line while Live plays, and at once when it's stopped. A pulsing number is waiting for the bar; a lit one is playing; a dim one is empty
